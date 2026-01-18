@@ -1,1 +1,5 @@
-firebase-admin
+asyncio
+pyjwt
+bcrypt
+customtkinter
+Pillow

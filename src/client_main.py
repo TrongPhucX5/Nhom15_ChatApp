@@ -1,38 +1,87 @@
+import customtkinter as ctk
 import sys
 import os
 
-# --- THÊM ĐƯỜNG DẪN ĐỂ IMPORT MODULE ---
-# Giúp python tìm thấy folder 'ui' và 'database'
+# Đường dẫn import
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-try:
-    from ui.login_window import LoginWindow
-    from ui.chat_window import ChatAppClient
-except ImportError as e:
-    print("LỖI IMPORT: Không tìm thấy file giao diện!")
-    print("Hãy chắc chắn bạn đã tạo file login_window.py và chat_window.py trong thư mục src/ui/")
-    print(f"Chi tiết lỗi: {e}")
-    sys.exit()
+from ui.login_window import LoginWindow
+from ui.chat_window import ChatAppClient
 
-def main():
-    # --- HÀM CHUYỂN ĐỔI TỪ LOGIN SANG CHAT ---
-    def on_login_success(username):
-        print(f"[SYSTEM] Đăng nhập thành công! User: {username}")
-        print("[SYSTEM] Đang mở giao diện Chat...")
+ctk.set_appearance_mode("Light")
+ctk.set_default_color_theme("blue")
+
+class MainApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
         
-        # Sau khi LoginWindow tự hủy (destroy), ta khởi tạo ChatAppClient
-        # Lưu ý: ChatAppClient là một mainloop mới
-        try:
-            chat_app = ChatAppClient(username_from_login=username)
-            # app.mainloop() đã được gọi bên trong __init__ của ChatAppClient rồi 
-            # (nếu bạn dùng code chat_window.py tôi đưa ở bước trước)
-        except Exception as e:
-            print(f"Lỗi khi mở Chat: {e}")
+        self.title("ChatApp Enterprise - Zalo Clone")
+        self.geometry("1000x650")
+        self.resizable(True, True)
 
-    # --- CHẠY MÀN HÌNH LOGIN TRƯỚC ---
-    print("[SYSTEM] Đang khởi động ứng dụng...")
-    # Khi login thành công, hàm on_login_success sẽ được gọi
-    LoginWindow(on_login_success_callback=on_login_success)
+        # Container chứa các màn hình (Frame)
+        self.container = ctk.CTkFrame(self)
+        self.container.pack(fill="both", expand=True)
+        
+        # Dictionary lưu trạng thái username/socket khi chuyển màn hình
+        self.session_data = {
+            "username": None,
+            "socket": None
+        }
+
+        self.show_login()
+
+    def clear_container(self):
+        for widget in self.container.winfo_children():
+            widget.destroy()
+
+    def show_login(self):
+        self.clear_container()
+        self.geometry("1000x650") # Reset size cho login
+        
+        # LoginWindow giờ là Frame
+        login_screen = LoginWindow(master=self.container, on_login_success=self.on_login_success)
+        login_screen.pack(fill="both", expand=True)
+
+    def on_login_success(self, username, sock):
+        self.session_data["username"] = username
+        self.session_data["socket"] = sock
+        
+        print(f"[SYSTEM] Đăng nhập thành công: {username}")
+        self.show_chat()
+
+    def show_chat(self):
+        self.clear_container()
+        self.geometry("1100x700") # Resize lớn hơn cho chat
+        self.minsize(950, 600)
+        
+        chat_screen = ChatAppClient(
+            master=self.container,
+            username_from_login=self.session_data["username"],
+            existing_socket=self.session_data["socket"],
+            on_logout_callback=self.on_logout
+        )
+        chat_screen.pack(fill="both", expand=True)
+
+    def on_logout(self):
+        print(f"[SYSTEM] Đăng xuất: {self.session_data['username']}")
+        # Đóng socket cũ
+        if self.session_data["socket"]:
+            try: self.session_data["socket"].close()
+            except: pass
+        
+        self.session_data = {"username": None, "socket": None}
+        self.show_login()
+
+    def on_close(self):
+        # Đóng socket nếu có
+        sock = self.session_data.get("socket")
+        if sock:
+            try: sock.close()
+            except: pass
+        self.destroy()
 
 if __name__ == "__main__":
-    main()
+    app = MainApp()
+    app.protocol("WM_DELETE_WINDOW", app.on_close)
+    app.mainloop()

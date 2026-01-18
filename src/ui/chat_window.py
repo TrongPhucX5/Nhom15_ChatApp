@@ -4,6 +4,18 @@ import socket
 import threading
 import datetime
 import os
+import sys
+
+# Thêm đường dẫn để import core.protocol nếu chạy trực tiếp
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+try:
+    from core.protocol import Protocol
+except ImportError:
+    # Fallback nếu path chưa chuẩn
+    import sys
+    sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+    from core.protocol import Protocol
 
 # --- CẤU HÌNH MÀU SẮC ZALO ---
 ZALO_BLUE = "#0068ff"
@@ -14,23 +26,19 @@ ZALO_BUBBLE_YOU = "#ffffff"
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
 
-class ChatAppClient(ctk.CTk):
-    def __init__(self, username_from_login=None, host='127.0.0.1', port=65432):
-        super().__init__()
+class ChatAppClient(ctk.CTkFrame):
+    def __init__(self, master, username_from_login=None, host='127.0.0.1', port=65432, existing_socket=None, on_logout_callback=None):
+        super().__init__(master)
         
         # --- DATA ---
+        self.on_logout_callback = on_logout_callback
         self.username = username_from_login or "User"
         self.server_host = host
         self.server_port = port
-        self.client_socket = None
+        self.client_socket = existing_socket
         self.is_running = True
         self.current_tab = "MSG" # Quản lý tab đang mở (MSG, CONTACT, TODO)
 
-        # --- SETUP WINDOW ---
-        self.title(f"Zalo PC - {self.username}")
-        self.geometry("1100x700")
-        self.minsize(950, 600)
-        
         # Layout 3 cột
         self.grid_columnconfigure(0, minsize=70)   # Nav
         self.grid_columnconfigure(1, minsize=300)  # Sidebar
@@ -48,15 +56,18 @@ class ChatAppClient(ctk.CTk):
         # Thread nhận tin
         self.recv_thread = threading.Thread(target=self.receive_loop, daemon=True)
         self.recv_thread.start()
-        
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.mainloop()
 
     def connect_server(self):
+        # Nếu đã có socket (từ Login truyền sang) thì dùng luôn
+        if self.client_socket:
+            return True
+        
         try:
             self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.client_socket.connect((self.server_host, self.server_port))
-            self.client_socket.send(f"LOGIN|{self.username}".encode('utf-8'))
+            # Gửi LOGIN dùng Protocol
+            msg = Protocol.pack(f"LOGIN|{self.username}")
+            self.client_socket.sendall(msg)
             return True
         except Exception as e:
             messagebox.showerror("Lỗi", f"Không kết nối được Server!\n{e}")
@@ -309,7 +320,11 @@ class ChatAppClient(ctk.CTk):
         msg = self.entry_msg.get().strip()
         if not msg: return
         try:
-            self.client_socket.send(f"MSG|{msg}".encode('utf-8'))
+            # self.client_socket.send(f"MSG|{msg}".encode('utf-8'))
+            # Dùng Protocol để đóng gói
+            data = Protocol.pack(f"MSG|{msg}")
+            self.client_socket.sendall(data)
+            
             self.add_message_bubble("Bạn", msg, is_me=True)
             self.entry_msg.delete(0, "end")
         except: pass
@@ -357,19 +372,32 @@ class ChatAppClient(ctk.CTk):
     def receive_loop(self):
         while self.is_running:
             try:
-                data = self.client_socket.recv(4096).decode('utf-8')
+                # Dùng Protocol để nhận tin nhắn trọn vẹn (xử lý dính gói)
+                data = Protocol.recv_msg_sync(self.client_socket)
+                
                 if not data: break
+                
                 if data.startswith("MSG|"):
                     parts = data.split("|")
-                    self.add_message_bubble(parts[1], parts[2], is_me=False)
+                    if len(parts) >= 3:
+                        sender = parts[1]
+                        content = "|".join(parts[2:]) # Handle nội dung có chứa ký tự |
+                        self.add_message_bubble(sender, content, is_me=False)
                 elif data.startswith("LIST|"):
                     self.update_user_list_ui(data.split("|")[1])
             except: break
     
     def on_close(self):
         self.is_running = False
-        if self.client_socket: self.client_socket.close()
-        self.destroy()
+        if self.client_socket: 
+            try: self.client_socket.close()
+            except: pass
+            
+        if self.on_logout_callback:
+            self.on_logout_callback()
+        else:
+            self.destroy()
 
-if __name__ == "__main__":
-    ChatAppClient(username_from_login="Dev")
+# if __name__ == "__main__":
+#     # Standalone testing not supported without MainApp
+#     pass

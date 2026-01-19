@@ -32,6 +32,7 @@ class AsyncChatServer:
     def __init__(self):
 
         self.clients = {} # {writer: username}
+        self.client_emails = {} # {writer: email}
         self.db = DBHandler() if has_db else None
 
     # --- JWT UTILS ---
@@ -66,6 +67,8 @@ class AsyncChatServer:
         if writer in self.clients:
             username = self.clients[writer]
             del self.clients[writer]
+            if writer in self.client_emails:
+                del self.client_emails[writer]
             print(f" [EXIT] {username} đã ngắt kết nối.")
             try: writer.close()
             except: pass
@@ -154,7 +157,11 @@ class AsyncChatServer:
                                 token = self.generate_token(email, user_name_db)
                                 username = user_name_db
                                 isAuthenticated = True
+                                self.clients[writer] = username
+                                self.client_emails[writer] = email
+                                
                                 response = f"AUTH|SUCCESS|{token}|{username}"
+                                print(f" [LOGIN] {username} đã tham gia.")
                             else:
                                 response = "AUTH|FAIL|Sai tài khoản hoặc mật khẩu"
                         else:
@@ -272,6 +279,83 @@ class AsyncChatServer:
                                     except: pass
                         else:
                             writer.write(Protocol.pack(f"ERR|{res}"))
+                        await writer.drain()
+
+                        await writer.drain()
+
+                # --- USER MANAGEMENT ---
+                elif msg.startswith("CMD_PASS_CHANGE|"):
+                    parts = msg.split("|")
+                    if len(parts) >= 3:
+                        old_p, new_p = parts[1], parts[2]
+                        if self.db and writer in self.client_emails:
+                            loop = asyncio.get_running_loop()
+                            res, msg_res = await loop.run_in_executor(None, self.db.update_password, self.client_emails[writer], old_p, new_p)
+                            writer.write(Protocol.pack(f"CMD_RES|PASS|{str(res)}|{msg_res}"))
+                            await writer.drain()
+
+                elif msg.startswith("CMD_UPDATE_INFO|"):
+                    parts = msg.split("|")
+                    if len(parts) >= 3:
+                        new_name, new_email = parts[1], parts[2]
+                        if self.db and writer in self.client_emails:
+                            current_email = self.client_emails[writer]
+                            loop = asyncio.get_running_loop()
+                            res, msg_res = await loop.run_in_executor(None, self.db.update_info, current_email, new_name, new_email)
+                            if res:
+                                # Update in-memory session if email changed
+                                self.client_emails[writer] = new_email
+                                self.clients[writer] = new_name
+                                # TODO: Broadcast name change?
+                            writer.write(Protocol.pack(f"CMD_RES|INFO|{str(res)}|{msg_res}"))
+                            await writer.drain()
+
+                elif msg.startswith("CMD_UPDATE_AVATAR|"):
+                    parts = msg.split("|")
+                    if len(parts) >= 3:
+                        filename, b64_data = parts[1], parts[2]
+                        if self.db and writer in self.client_emails:
+                             # Save file
+                             if not os.path.exists("uploads/avatars"):
+                                 os.makedirs("uploads/avatars")
+                             
+                             fname_secure = f"{self.client_emails[writer]}_{datetime.datetime.now().strftime('%M%S')}_{filename}"
+                             file_path = f"uploads/avatars/{fname_secure}"
+                             
+                             try:
+                                 with open(file_path, "wb") as f:
+                                     f.write(base64.b64decode(b64_data))
+                                 
+                                 loop = asyncio.get_running_loop()
+                                 res, msg_res = await loop.run_in_executor(None, self.db.update_avatar, self.client_emails[writer], file_path)
+                                 writer.write(Protocol.pack(f"CMD_RES|AVATAR|{str(res)}|{file_path}"))
+                             except Exception as e:
+                                 writer.write(Protocol.pack(f"CMD_RES|AVATAR|False|{str(e)}"))
+                             await writer.drain()
+                
+                elif msg.startswith("CMD_TYPING|"):
+                    # CMD_TYPING|target|sender
+                    parts = msg.split("|")
+                    if len(parts) >= 3:
+                        target, sender = parts[1], parts[2]
+                        # Broadcast TYPING|target|sender to appropriate people
+                        if target == "General":
+                             # Broadcast to all except sender
+                             await self.broadcast(f"TYPING|{target}|{sender}", exclude_writer=writer)
+                        else:
+                             # Broadcast to Group
+                             await self.broadcast_group(target, f"TYPING|{target}|{sender}", exclude_writer=writer)
+                             
+                elif msg.startswith("CMD_GET_INFO"):
+                    if self.db and writer in self.client_emails:
+                        loop = asyncio.get_running_loop()
+                        info = await loop.run_in_executor(None, self.db.get_user_info, self.client_emails[writer])
+                        if info:
+                            # INFO|name|email|avatar
+                            avt = info['avatar'] if info['avatar'] else ""
+                            writer.write(Protocol.pack(f"CMD_RES|GET_INFO|{info['username']}|{info['email']}|{avt}"))
+                        else:
+                            writer.write(Protocol.pack("CMD_RES|GET_INFO|Error|Error|"))
                         await writer.drain()
 
                 elif msg.startswith("FILE|"):

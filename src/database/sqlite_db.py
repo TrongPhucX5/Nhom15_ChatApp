@@ -22,9 +22,15 @@ class DBHandler:
                 username TEXT,
                 password TEXT,
                 last_login TEXT,
-                status TEXT
+                status TEXT,
+                avatar TEXT
             )
         ''')
+
+        # Migration: Add avatar column if not exists
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN avatar TEXT")
+        except: pass
         
         # Bảng Messages (Cập nhật cho chat_v2: thêm msg_type, file_path)
         cursor.execute('''
@@ -275,6 +281,77 @@ class DBHandler:
             conn.commit()
             conn.close()
         except: pass
+
+    # --- ADVANCED FEATURES ---
+    def update_password(self, email, old_pass, new_pass):
+        """Đổi mật khẩu"""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            cursor = conn.cursor()
+            
+            # Verify old pass
+            cursor.execute("SELECT password FROM users WHERE email=?", (email,))
+            row = cursor.fetchone()
+            if not row: return False, "Tài khoản không tồn tại"
+            
+            stored_hash = row[0]
+            if not bcrypt.checkpw(old_pass.encode('utf-8'), stored_hash.encode('utf-8')):
+                return False, "Mật khẩu cũ không đúng"
+            
+            # Hash new pass
+            salt = bcrypt.gensalt()
+            new_hashed = bcrypt.hashpw(new_pass.encode('utf-8'), salt).decode('utf-8')
+            
+            cursor.execute("UPDATE users SET password=? WHERE email=?", (new_hashed, email))
+            conn.commit()
+            conn.close()
+            return True, "Đổi mật khẩu thành công"
+        except Exception as e:
+            return False, str(e)
+
+    def update_info(self, current_email, new_name, new_email):
+        """Cập nhật thông tin (Tên, Email)"""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            cursor = conn.cursor()
+            
+            # Check duplicate email if changed
+            if current_email != new_email:
+                cursor.execute("SELECT email FROM users WHERE email=?", (new_email,))
+                if cursor.fetchone():
+                    return False, "Email mới đã tồn tại"
+            
+            cursor.execute("UPDATE users SET username=?, email=? WHERE email=?", (new_name, new_email, current_email))
+            conn.commit()
+            conn.close()
+            return True, "Cập nhật thông tin thành công"
+        except Exception as e:
+            return False, str(e)
+
+    def update_avatar(self, email, avatar_path):
+        """Cập nhật đường dẫn Avatar"""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET avatar=? WHERE email=?", (avatar_path, email))
+            conn.commit()
+            conn.close()
+            return True, "Cập nhật avatar thành công"
+        except Exception as e:
+            return False, str(e)
+
+    def get_user_info(self, email):
+        """Lấy thông tin profile"""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            cursor = conn.cursor()
+            cursor.execute("SELECT username, email, avatar FROM users WHERE email=?", (email,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                return {"username": row[0], "email": row[1], "avatar": row[2]}
+            return None
+        except: return None
 
     # Giữ lại hàm cũ để tránh lỗi gọi từ Server (nếu có)
     def log_user(self, username):

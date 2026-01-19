@@ -25,13 +25,15 @@ class DBHandler:
             )
         ''')
         
-        # Bảng Messages (Giữ nguyên)
+        # Bảng Messages (Cập nhật cho chat_v2: thêm msg_type, file_path)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sender TEXT,
                 content TEXT,
-                timestamp TEXT
+                timestamp TEXT,
+                msg_type TEXT DEFAULT 'text',
+                file_path TEXT
             )
         ''')
         
@@ -50,6 +52,26 @@ class DBHandler:
         conn.commit()
         conn.close()
         print(f"[DB] SQLite đã sẵn sàng tại: {self.db_path}")
+
+    # ... (省略 register_user, check_login, log_user_login) ...
+
+    def save_message(self, sender, msg, msg_type="text", file_path=None):
+        """Lưu tin nhắn (Text hoặc File) vào lịch sử"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            now = str(datetime.datetime.now())
+            
+            cursor.execute('''
+                INSERT INTO messages (sender, content, timestamp, msg_type, file_path)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (sender, msg, now, msg_type, file_path))
+            
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[DB] Lỗi save_message: {e}")
 
     def register_user(self, email, password, username):
         """Đăng ký tài khoản mới"""
@@ -122,20 +144,4 @@ class DBHandler:
     def log_user(self, username):
         pass # Đã xử lý trong check_login
 
-    def save_message(self, sender, msg):
-        """Lưu tin nhắn vào lịch sử"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            now = str(datetime.datetime.now())
-            
-            cursor.execute('''
-                INSERT INTO messages (sender, content, timestamp)
-                VALUES (?, ?, ?)
-            ''', (sender, msg, now))
-            
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            print(f"[DB] Lỗi save_message: {e}")
+

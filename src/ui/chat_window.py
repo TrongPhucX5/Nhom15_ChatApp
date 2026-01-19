@@ -5,6 +5,9 @@ import threading
 import datetime
 import os
 import sys
+import base64
+from PIL import Image
+import io
 
 # Thêm đường dẫn để import core.protocol nếu chạy trực tiếp
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,6 +28,36 @@ ZALO_BUBBLE_YOU = "#ffffff"
 
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
+
+# --- TOOLTIP CLASS ---
+class ToolTip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tooltip = None
+        self.widget.bind("<Enter>", self.show)
+        self.widget.bind("<Leave>", self.hide)
+
+    def show(self, event=None):
+        try:
+            x, y, _, _ = self.widget.bbox("insert")
+            x += self.widget.winfo_rootx() + 25
+            y += self.widget.winfo_rooty() + 25
+
+            self.tooltip = ctk.CTkToplevel(self.widget)
+            self.tooltip.wm_overrideredirect(True)
+            self.tooltip.wm_geometry(f"+{x}+{y}")
+            self.tooltip.attributes("-topmost", True)
+            
+            # Label
+            label = ctk.CTkLabel(self.tooltip, text=self.text, fg_color="#2b2b2b", text_color="white", corner_radius=5, height=25)
+            label.pack(padx=5, pady=2)
+        except: pass
+
+    def hide(self, event=None):
+        if self.tooltip:
+            self.tooltip.destroy()
+            self.tooltip = None
 
 class ChatAppClient(ctk.CTkFrame):
     def __init__(self, master, username_from_login=None, host='127.0.0.1', port=65432, existing_socket=None, on_logout_callback=None):
@@ -83,26 +116,31 @@ class ChatAppClient(ctk.CTkFrame):
         self.nav_frame.grid_propagate(False)
 
         # Avatar
-        ctk.CTkButton(self.nav_frame, text=self.username[0].upper(), width=45, height=45, corner_radius=22,
+        btn_avatar = ctk.CTkButton(self.nav_frame, text=self.username[0].upper(), width=45, height=45, corner_radius=22,
                       fg_color="#1a8cff", hover_color="white", text_color="white", font=("Arial", 18, "bold"),
-                      command=self.open_profile_modal).pack(pady=(30, 20))
+                      command=self.open_profile_modal)
+        btn_avatar.pack(pady=(30, 20))
+        ToolTip(btn_avatar, "Hồ sơ của bạn")
 
         # Tabs
-        self.btn_nav_msg = self.create_nav_btn("💬", True, command=lambda: self.switch_tab("MSG"))
-        self.btn_nav_contact = self.create_nav_btn("📇", False, command=lambda: self.switch_tab("CONTACT"))
-        self.btn_nav_todo = self.create_nav_btn("✅", False, command=lambda: self.switch_tab("TODO"))
+        self.btn_nav_msg = self.create_nav_btn("💬", True, lambda: self.switch_tab("MSG"), "Tin nhắn")
+        self.btn_nav_contact = self.create_nav_btn("📇", False, lambda: self.switch_tab("CONTACT"), "Danh bạ")
+        self.btn_nav_todo = self.create_nav_btn("✅", False, lambda: self.switch_tab("TODO"), "Việc cần làm")
         
-        # Settings (Fix lỗi: Gắn đúng hàm open_settings_modal)
-        ctk.CTkButton(self.nav_frame, text="⚙️", width=40, height=40, fg_color="transparent",
+        # Settings
+        btn_settings = ctk.CTkButton(self.nav_frame, text="⚙️", width=40, height=40, fg_color="transparent",
                       hover_color="#1a8cff", font=("Segoe UI Emoji", 22),
-                      command=self.open_settings_modal).pack(side="bottom", pady=20)
+                      command=self.open_settings_modal)
+        btn_settings.pack(side="bottom", pady=20)
+        ToolTip(btn_settings, "Cài đặt")
 
-    def create_nav_btn(self, icon, is_active, command):
+    def create_nav_btn(self, icon, is_active, command, tooltip=""):
         color = "#1a8cff" if is_active else "transparent"
         btn = ctk.CTkButton(self.nav_frame, text=icon, width=45, height=45, corner_radius=12,
                             fg_color=color, hover_color="#1a8cff", font=("Segoe UI Emoji", 22),
                             command=command)
         btn.pack(pady=8)
+        if tooltip: ToolTip(btn, tooltip)
         return btn
 
     def switch_tab(self, tab_name):
@@ -141,8 +179,10 @@ class ChatAppClient(ctk.CTkFrame):
         self.lbl_sidebar_title = ctk.CTkLabel(header_side, text="Tìm kiếm", font=("Segoe UI", 14, "bold"), text_color="gray")
         self.lbl_sidebar_title.pack(side="left", padx=15, pady=15)
         
-        ctk.CTkButton(header_side, text="➕", width=30, height=30, fg_color="transparent", text_color="black", 
-                      hover_color="#eee", font=("Arial", 16), command=self.add_new_action).pack(side="right", padx=10)
+        btn_add = ctk.CTkButton(header_side, text="➕", width=30, height=30, fg_color="transparent", text_color="black", 
+                      hover_color="#eee", font=("Arial", 16), command=self.add_new_action)
+        btn_add.pack(side="right", padx=10)
+        ToolTip(btn_add, "Tạo mới")
 
         # Search box
         self.entry_search = ctk.CTkEntry(self.side_frame, placeholder_text="Tìm bạn bè, tin nhắn...", height=35, 
@@ -176,10 +216,15 @@ class ChatAppClient(ctk.CTkFrame):
         ctk.CTkLabel(info, text="Trực tuyến", font=("Segoe UI", 11), text_color="green").pack(anchor="w")
         
         # Icons Header (Video Call, Search)
-        ctk.CTkButton(self.header, text="📹", width=40, height=40, fg_color="transparent", text_color="#555", 
-                      hover_color="#f0f0f0", font=("Segoe UI Emoji", 20), command=self.dummy_video_call).pack(side="right", padx=15)
-        ctk.CTkButton(self.header, text="🔍", width=40, height=40, fg_color="transparent", text_color="#555", 
-                      hover_color="#f0f0f0", font=("Segoe UI Emoji", 20), command=lambda: messagebox.showinfo("Info", "Tìm tin nhắn cũ")).pack(side="right")
+        btn_video = ctk.CTkButton(self.header, text="📹", width=40, height=40, fg_color="transparent", text_color="#555", 
+                      hover_color="#f0f0f0", font=("Segoe UI Emoji", 20), command=self.dummy_video_call)
+        btn_video.pack(side="right", padx=15)
+        ToolTip(btn_video, "Gọi Video (Giả lập)")
+        
+        btn_search_msg = ctk.CTkButton(self.header, text="🔍", width=40, height=40, fg_color="transparent", text_color="#555", 
+                      hover_color="#f0f0f0", font=("Segoe UI Emoji", 20), command=lambda: messagebox.showinfo("Info", "Tìm tin nhắn cũ"))
+        btn_search_msg.pack(side="right")
+        ToolTip(btn_search_msg, "Tìm tin nhắn")
 
         # --- Chat Area ---
         self.msg_area = ctk.CTkScrollableFrame(self.main_frame, fg_color=ZALO_BG_LIGHT)
@@ -193,11 +238,12 @@ class ChatAppClient(ctk.CTkFrame):
         toolbar = ctk.CTkFrame(self.input_container, height=40, fg_color="transparent")
         toolbar.pack(fill="x", padx=10, pady=(5,0))
         
-        # Các nút chức năng Toolbar (Đã gắn hàm giả lập)
-        self.create_tool_btn(toolbar, "📎", self.send_file_action) # File
-        self.create_tool_btn(toolbar, "🖼️", self.send_image_action) # Ảnh
-        self.create_tool_btn(toolbar, "😀", self.dummy_sticker)     # Sticker
-        self.create_tool_btn(toolbar, "📅", lambda: messagebox.showinfo("Lịch", "Tạo nhắc hẹn"))
+        # Các nút chức năng Toolbar
+        self.create_tool_btn(toolbar, "📎", self.send_file_action, "Gửi File") 
+        self.create_tool_btn(toolbar, "🖼️", self.send_image_action, "Gửi Ảnh") 
+        self.create_tool_btn(toolbar, "🎥", self.send_video_action, "Gửi Video") 
+        self.create_tool_btn(toolbar, "😀", self.dummy_sticker, "Gửi Sticker")     
+        self.create_tool_btn(toolbar, "📅", lambda: messagebox.showinfo("Lịch", "Tạo nhắc hẹn"), "Tạo nhắc hẹn")
 
         # Ô nhập
         self.entry_msg = ctk.CTkEntry(self.input_container, placeholder_text="Nhập tin nhắn...",
@@ -214,10 +260,13 @@ class ChatAppClient(ctk.CTkFrame):
                       fg_color="#e5efff", text_color=ZALO_BLUE, hover_color="#c7e0ff", 
                       font=("Segoe UI", 12, "bold"), command=self.send_msg).pack(side="right")
 
-    def create_tool_btn(self, parent, icon, cmd):
-        ctk.CTkButton(parent, text=icon, width=40, height=35, fg_color="transparent", 
+    def create_tool_btn(self, parent, icon, cmd, tooltip=""):
+        btn = ctk.CTkButton(parent, text=icon, width=40, height=35, fg_color="transparent", 
                       text_color="#555", hover_color="#f0f0f0", font=("Segoe UI Emoji", 18), 
-                      command=cmd).pack(side="left", padx=2)
+                      command=cmd)
+        btn.pack(side="left", padx=2)
+        if tooltip: ToolTip(btn, tooltip)
+        return btn
 
     # =========================================================================
     # 4. CÁC HÀM XỬ LÝ SỰ KIỆN (INTERACTIONS)
@@ -309,11 +358,41 @@ class ChatAppClient(ctk.CTkFrame):
 
     def send_file_action(self):
         f = filedialog.askopenfilename()
-        if f: self.entry_msg.insert(0, f"[FILE] {os.path.basename(f)}")
+        if f: 
+            self.process_and_send_file(f)
 
     def send_image_action(self):
         f = filedialog.askopenfilename(filetypes=[("Images", "*.png;*.jpg;*.jpeg")])
-        if f: self.entry_msg.insert(0, f"[IMAGE] {os.path.basename(f)}")
+        if f: 
+            self.process_and_send_file(f)
+
+    def send_video_action(self):
+        f = filedialog.askopenfilename(filetypes=[("Videos", "*.mp4;*.avi;*.mov;*.mkv")])
+        if f:
+            self.process_and_send_file(f)
+
+    def process_and_send_file(self, filepath):
+        try:
+            filename = os.path.basename(filepath)
+            # Giới hạn kích thước (ví dụ 10MB) để tránh treo base64
+            if os.path.getsize(filepath) > 10 * 1024 * 1024:
+                messagebox.showwarning("File quá lớn", "Vui lòng gửi file < 10MB.")
+                # Vẫn cho gửi nếu user muốn risk? Hoặc return luôn. 
+                # Hiện tại return để an toàn.
+                return
+
+            with open(filepath, "rb") as file:
+                b64_data = base64.b64encode(file.read()).decode('utf-8')
+            
+            # Gửi FILE|filename|b64
+            data = Protocol.pack(f"FILE|{filename}|{b64_data}")
+            self.client_socket.sendall(data)
+            
+            # Hiện bubble phía mình (dùng b64 để hiển thị preview luôn cho đồng bộ)
+            self.add_message_bubble("Bạn", filename, is_me=True, msg_type="file", file_data=b64_data)
+            
+        except Exception as e:
+            messagebox.showerror("Lỗi gửi file", str(e))
 
     # --- LOGIC MẠNG (CORE) ---
     def send_msg(self, event=None):
@@ -325,7 +404,7 @@ class ChatAppClient(ctk.CTkFrame):
             data = Protocol.pack(f"MSG|{msg}")
             self.client_socket.sendall(data)
             
-            self.add_message_bubble("Bạn", msg, is_me=True)
+            self.add_message_bubble("Bạn", msg, is_me=True, msg_type="text")
             self.entry_msg.delete(0, "end")
         except: pass
 
@@ -347,7 +426,7 @@ class ChatAppClient(ctk.CTkFrame):
             ctk.CTkLabel(info, text=u, font=("Segoe UI", 13, "bold"), text_color="black").pack(anchor="w")
             ctk.CTkLabel(info, text="Online", font=("Segoe UI", 11), text_color="green").pack(anchor="w")
 
-    def add_message_bubble(self, sender, content, is_me):
+    def add_message_bubble(self, sender, content, is_me, msg_type="text", file_data=None):
         if is_me:
             bg, align, anchor = ZALO_BUBBLE_ME, "right", "e"
         else:
@@ -366,8 +445,86 @@ class ChatAppClient(ctk.CTkFrame):
         if not is_me:
              ctk.CTkLabel(bubble, text=sender, font=("Segoe UI", 10, "bold"), text_color="gray").pack(anchor="w", padx=12, pady=(5,0))
         
-        ctk.CTkLabel(bubble, text=content, font=("Segoe UI", 13), text_color="black", wraplength=450, justify="left").pack(padx=12, pady=8)
+        if msg_type == "text":
+            ctk.CTkLabel(bubble, text=content, font=("Segoe UI", 13), text_color="black", wraplength=450, justify="left").pack(padx=12, pady=8)
+        
+        elif msg_type == "file":
+            filename = content
+            ext = filename.split('.')[-1].lower() if '.' in filename else ""
+            
+            # --- XỬ LÝ ẢNH ---
+            if ext in ['png', 'jpg', 'jpeg']:
+                try:
+                    if file_data:
+                        img_data = base64.b64decode(file_data)
+                        pil_img = Image.open(io.BytesIO(img_data))
+                        # Calc ratio to max 250px
+                        w, h = pil_img.size
+                        ratio = min(250/w, 250/h)
+                        new_w, new_h = int(w*ratio), int(h*ratio)
+                        
+                        ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(new_w, new_h))
+                        label = ctk.CTkLabel(bubble, text="", image=ctk_img)
+                        label.pack(padx=5, pady=5)
+                        
+                        # Bind Click to Open Viewer
+                        label.bind("<Button-1>", lambda e, p=pil_img, n=filename: self.open_image_viewer(p, n))
+                        label.configure(cursor="hand2")
+                    else:
+                        ctk.CTkLabel(bubble, text=f"[Ảnh] {filename}", text_color="gray").pack(padx=12, pady=8)
+                except Exception as e:
+                    ctk.CTkLabel(bubble, text=f"[Lỗi Ảnh] {filename}", text_color="red").pack(padx=12, pady=8)
+
+            # --- XỬ LÝ TEXT (PREVIEW) ---
+            elif ext == 'txt':
+                preview_text = f"📄 {filename}\n"
+                try:
+                    if file_data:
+                        raw_txt = base64.b64decode(file_data).decode('utf-8')
+                        # Lấy 300 ký tự đầu
+                        short_txt = raw_txt[:300] + ("..." if len(raw_txt) > 300 else "")
+                        preview_text += "-" * 20 + "\n" + short_txt
+                except:
+                    preview_text += "(Không thể đọc nội dung)"
+                
+                ctk.CTkLabel(bubble, text=preview_text, font=("Consolas", 11), text_color="black", justify="left", wraplength=400).pack(padx=12, pady=5)
+                
+                # Nút tải
+                btn_text = "⬇ Tải về"
+                ctk.CTkButton(bubble, text=btn_text, height=25, width=60, font=("Segoe UI", 11), fg_color="#e6f2ff", text_color="#0068ff", hover_color="#cce5ff",
+                              command=lambda: self.save_file_local(filename, file_data)).pack(padx=12, pady=(0, 8), anchor="w")
+
+            # --- XỬ LÝ VIDEO ---
+            elif ext in ['mp4', 'avi', 'mov', 'mkv']:
+                ctk.CTkLabel(bubble, text="🎥 " + filename, font=("Segoe UI", 13, "bold"), text_color="#e01b24").pack(padx=12, pady=(8,0), anchor="w")
+                ctk.CTkLabel(bubble, text="(Video)", font=("Segoe UI", 10), text_color="gray").pack(padx=12, pady=(0,5), anchor="w")
+                
+                # Nút tải
+                ctk.CTkButton(bubble, text="⬇ Lưu Video", height=25, width=80, font=("Segoe UI", 11), fg_color="#ffe6e6", text_color="#e01b24", hover_color="#ffd1d1",
+                              command=lambda: self.save_file_local(filename, file_data)).pack(padx=12, pady=8, anchor="w")
+
+            # --- FILE KHÁC ---
+            else:
+                ctk.CTkLabel(bubble, text="📁 " + filename, font=("Segoe UI", 13, "bold"), text_color="#0068ff").pack(padx=12, pady=(8,0), anchor="w")
+                # Luôn hiện nút tải nếu có data
+                if file_data: 
+                     ctk.CTkButton(bubble, text="⬇ Tải về", height=25, width=60, font=("Segoe UI", 11), fg_color="#e6f2ff", text_color="#0068ff", hover_color="#cce5ff",
+                                  command=lambda: self.save_file_local(filename, file_data)).pack(padx=12, pady=8, anchor="w")
+                else:
+                    ctk.CTkLabel(bubble, text="Đã gửi", font=("Segoe UI", 10), text_color="gray").pack(padx=12, pady=5, anchor="w")
+
         self.msg_area._parent_canvas.yview_moveto(1.0)
+
+    def save_file_local(self, filename, b64_data):
+        try:
+            save_path = filedialog.asksaveasfilename(initialfile=filename, title="Lưu file")
+            if save_path:
+                with open(save_path, "wb") as f:
+                    f.write(base64.b64decode(b64_data))
+                messagebox.showinfo("Thành công", f"Đã lưu file tại:\n{save_path}")
+                os.startfile(os.path.dirname(save_path))
+        except Exception as e:
+            messagebox.showerror("Lỗi lưu file", str(e))
 
     def receive_loop(self):
         while self.is_running:
@@ -382,11 +539,88 @@ class ChatAppClient(ctk.CTkFrame):
                     if len(parts) >= 3:
                         sender = parts[1]
                         content = "|".join(parts[2:]) # Handle nội dung có chứa ký tự |
-                        self.add_message_bubble(sender, content, is_me=False)
+                        self.add_message_bubble(sender, content, is_me=False, msg_type="text")
+                
+                elif data.startswith("FILE|"):
+                    # FILE|sender|filename|b64
+                    parts = data.split("|")
+                    if len(parts) >= 4:
+                        sender = parts[1]
+                        filename = parts[2]
+                        b64_data = parts[3]
+                        self.add_message_bubble(sender, filename, is_me=False, msg_type="file", file_data=b64_data)
+
                 elif data.startswith("LIST|"):
                     self.update_user_list_ui(data.split("|")[1])
             except: break
     
+    def open_image_viewer(self, pil_image, filename):
+        """Mở cửa sổ xem ảnh phóng to với chức năng Zoom"""
+        viewer = ctk.CTkToplevel(self)
+        viewer.title(filename)
+        viewer.geometry("800x600")
+        viewer.attributes("-topmost", True)
+        viewer.configure(fg_color="black")
+        
+        # State cho Zoom
+        self.current_scale = 1.0
+        self.base_image = pil_image.copy()
+        
+        # Canvas để hiển thị ảnh
+        canvas = ctk.CTkCanvas(viewer, bg="black", highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+
+        # Hàm hiển thị ảnh theo scale
+        def update_image():
+            w, h = self.base_image.size
+            new_w = int(w * self.current_scale)
+            new_h = int(h * self.current_scale)
+            
+            # Resize
+            # Dùng LANCZOS hoặc BILINEAR cho đẹp
+            resized = self.base_image.resize((new_w, new_h), Image.LANCZOS)
+            
+            # Convert sang PhotoImage (tkinter compatible)
+            # Lưu ý: Phải giữ reference để không bị GC thu hồi
+            from PIL import ImageTk
+            self.tk_image = ImageTk.PhotoImage(resized)
+            
+            # Tính tọa độ giữa canvas
+            cw = canvas.winfo_width()
+            ch = canvas.winfo_height()
+            x = cw // 2
+            y = ch // 2
+            
+            canvas.delete("all")
+            canvas.create_image(x, y, image=self.tk_image, anchor="center")
+
+        # Handle Zoom (MouseWheel)
+        def on_mouse_wheel(event):
+            # Windows: event.delta = 120 (up) or -120 (down)
+            if event.delta > 0:
+                self.current_scale *= 1.1
+            else:
+                self.current_scale /= 1.1
+            update_image()
+
+        # Update lại ảnh khi resize cửa sổ
+        viewer.bind("<Configure>", lambda e: update_image())
+        
+        # Bind MouseWheel
+        viewer.bind("<MouseWheel>", on_mouse_wheel)
+        
+        # Click outside to close (Bind vào canvas)
+        canvas.bind("<Button-1>", lambda e: viewer.destroy())
+        
+        # Nút Close (X)
+        btn_close = ctk.CTkButton(viewer, text="✕", width=40, height=40, fg_color="transparent", 
+                                  text_color="white", font=("Arial", 20, "bold"), hover_color="#333",
+                                  command=viewer.destroy)
+        btn_close.place(relx=0.95, rely=0.05, anchor="center")
+
+        # Init lần đầu (delay nhẹ để canvas có kích thước)
+        viewer.after(100, update_image)
+
     def on_close(self):
         self.is_running = False
         if self.client_socket: 

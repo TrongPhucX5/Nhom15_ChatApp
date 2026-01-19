@@ -151,10 +151,42 @@ class AsyncChatServer:
                     
                     if self.db: 
                         loop = asyncio.get_running_loop()
-                        await loop.run_in_executor(None, self.db.save_message, username, content)
+                        await loop.run_in_executor(None, self.db.save_message, username, content, "text", None)
                     
                     response = f"MSG|{username}|{content}"
                     await self.broadcast(response, exclude_writer=writer)
+
+                elif msg.startswith("FILE|"):
+                    # FILE|filename|base64_string
+                    parts = msg.split("|")
+                    if len(parts) >= 3:
+                        filename = parts[1]
+                        b64_data = parts[2]
+                        
+                        # Tạo thư mục uploads nếu chưa có
+                        if not os.path.exists("uploads"):
+                            os.makedirs("uploads")
+                        
+                        file_path = f"uploads/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
+                        
+                        # Lưu file
+                        try:
+                            import base64
+                            with open(file_path, "wb") as f:
+                                f.write(base64.b64decode(b64_data))
+                            
+                            print(f"📁 [{username}] Gửi file: {filename}")
+                            
+                            if self.db:
+                                loop = asyncio.get_running_loop()
+                                await loop.run_in_executor(None, self.db.save_message, username, filename, "file", file_path)
+
+                            # Broadcast: FILE|username|filename|b64_data
+                            # Clients khác nhận được sẽ hiển thị và decode khi cần
+                            response = f"FILE|{username}|{filename}|{b64_data}"
+                            await self.broadcast(response, exclude_writer=writer)
+                        except Exception as e:
+                            print(f"[ERR] Save File Error: {e}")
 
         except Exception as e:
             print(f" [ERR] Lỗi xử lý client {username}: {e}")

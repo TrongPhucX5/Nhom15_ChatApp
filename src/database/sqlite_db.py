@@ -11,7 +11,8 @@ class DBHandler:
 
     def _init_db(self):
         """Khởi tạo bảng nếu chưa có"""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL;")
         cursor = conn.cursor()
         
         # Bảng Users cập nhật thêm email và password
@@ -78,7 +79,7 @@ class DBHandler:
     def create_group(self, name, created_by):
         """Tạo nhóm mới và thêm người tạo làm admin"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             cursor = conn.cursor()
             
             now = str(datetime.datetime.now())
@@ -99,7 +100,7 @@ class DBHandler:
     def add_group_member(self, group_name, username, role='member'):
         """Thêm thành viên vào nhóm"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             cursor = conn.cursor()
             
             # Get Group ID
@@ -118,10 +119,51 @@ class DBHandler:
         except Exception as e:
             return False, str(e)
 
+    def remove_group_member(self, group_name, username):
+        """Xóa thành viên khỏi nhóm (Rời nhóm)"""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT id FROM groups WHERE name=?", (group_name,))
+            row = cursor.fetchone()
+            if not row: return False, "Nhóm không tồn tại"
+            group_id = row[0]
+            
+            cursor.execute("DELETE FROM group_members WHERE group_id=? AND username=?", (group_id, username))
+            conn.commit()
+            conn.close()
+            return True, "Đã rời nhóm"
+        except Exception as e:
+            return False, str(e)
+
+    def delete_group(self, group_name, username):
+        """Xóa nhóm (Chỉ Admin/Creator thực hiện được)"""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT id, created_by FROM groups WHERE name=?", (group_name,))
+            row = cursor.fetchone()
+            if not row: return False, "Nhóm không tồn tại"
+            group_id, created_by = row
+            
+            if created_by != username:
+                return False, "Bạn không phải Admin nhóm này"
+            
+            cursor.execute("DELETE FROM group_members WHERE group_id=?", (group_id,))
+            cursor.execute("DELETE FROM groups WHERE id=?", (group_id,))
+            
+            conn.commit()
+            conn.close()
+            return True, "Đã xóa nhóm"
+        except Exception as e:
+            return False, str(e)
+
     def get_user_groups(self, username):
         """Lấy danh sách nhóm mà user tham gia"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT g.name FROM groups g
@@ -136,7 +178,7 @@ class DBHandler:
     def get_group_members(self, group_name):
         """Lấy danh sách thành viên của nhóm (để broadcast)"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT gm.username FROM group_members gm
@@ -152,7 +194,7 @@ class DBHandler:
     def save_message(self, sender, msg, msg_type="text", file_path=None):
         """Lưu tin nhắn (Text hoặc File) vào lịch sử"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             cursor = conn.cursor()
             
             now = str(datetime.datetime.now())
@@ -170,7 +212,7 @@ class DBHandler:
     def register_user(self, email, password, username):
         """Đăng ký tài khoản mới"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             cursor = conn.cursor()
 
             # Hash mật khẩu
@@ -195,7 +237,7 @@ class DBHandler:
     def check_login(self, email, password):
         """Kiểm tra đăng nhập"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             cursor = conn.cursor()
             
             cursor.execute("SELECT password, username FROM users WHERE email=?", (email,))
@@ -221,7 +263,7 @@ class DBHandler:
     def log_user_login(self, email):
         """Cập nhật giờ đăng nhập"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(self.db_path, timeout=30)
             cursor = conn.cursor()
             
             now = str(datetime.datetime.now())

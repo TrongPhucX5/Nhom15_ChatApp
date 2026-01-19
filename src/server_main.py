@@ -3,10 +3,14 @@ import sys
 import os
 import jwt
 import datetime
+from dotenv import load_dotenv
 
 # --- 1. Setup Path ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
+
+# Load env variables
+load_dotenv(os.path.join(os.path.dirname(current_dir), '.env'))
 
 # --- 2. Import Modules ---
 try:
@@ -21,11 +25,12 @@ from core.protocol import Protocol
 
 HOST = '127.0.0.1'
 PORT = 65432
-SECRET_KEY = "SECRET_KEY_NAO_DO_BAT_KI_RAT_DAI" # Nên để trong .env
+SECRET_KEY = os.getenv("SECRET_KEY", "DEFAULT_SECRET_KEY_IF_MISSING")
+print(f" [CONFIG] Loaded SECRET_KEY: {'***' if SECRET_KEY else 'None'}")
 
 class AsyncChatServer:
     def __init__(self):
-    def __init__(self):
+
         self.clients = {} # {writer: username}
         self.db = DBHandler() if has_db else None
 
@@ -86,6 +91,7 @@ class AsyncChatServer:
         if not self.db: return
         loop = asyncio.get_running_loop()
         members = await loop.run_in_executor(None, self.db.get_group_members, group_name)
+        print(f" [DEBUG] Group '{group_name}' members: {members}")
         
         encoded_msg = Protocol.pack(message)
         
@@ -95,7 +101,9 @@ class AsyncChatServer:
                 try:
                     writer.write(encoded_msg)
                     await writer.drain()
-                except: pass
+                    print(f" [DEBUG] Sent to {username}")
+                except Exception as e:
+                     print(f" [DEBUG] Failed to send to {username}: {e}")
 
     # --- HANDLE CLIENT ---
     async def handle_client(self, reader, writer):
@@ -227,6 +235,41 @@ class AsyncChatServer:
                             # Update group list
                             user_groups = await loop.run_in_executor(None, self.db.get_user_groups, username)
                             writer.write(Protocol.pack(f"GROUPS|{','.join(user_groups)}"))
+                        else:
+                            writer.write(Protocol.pack(f"ERR|{res}"))
+                        await writer.drain()
+
+                elif msg.startswith("GROUP_LEAVE|"):
+                    g_name = msg.split("|")[1]
+                    if self.db:
+                        loop = asyncio.get_running_loop()
+                        success, res = await loop.run_in_executor(None, self.db.remove_group_member, g_name, username)
+                        if success:
+                            writer.write(Protocol.pack(f"GROUP_LEFT|{g_name}"))
+                            await self.broadcast_group(g_name, f"GROUP_MSG|{g_name}|System|{username} đã rời nhóm.", exclude_writer=writer)
+                            user_groups = await loop.run_in_executor(None, self.db.get_user_groups, username)
+                            writer.write(Protocol.pack(f"GROUPS|{','.join(user_groups)}"))
+                        else:
+                            writer.write(Protocol.pack(f"ERR|{res}"))
+                        await writer.drain()
+
+                elif msg.startswith("GROUP_DELETE|"):
+                    g_name = msg.split("|")[1]
+                    if self.db:
+                        loop = asyncio.get_running_loop()
+                        members = await loop.run_in_executor(None, self.db.get_group_members, g_name)
+                        success, res = await loop.run_in_executor(None, self.db.delete_group, g_name, username)
+                        if success:
+                            encoded_del = Protocol.pack(f"GROUP_DELETED|{g_name}")
+                            for w, u in self.clients.items():
+                                if u in members:
+                                    try:
+                                        w.write(encoded_del)
+                                        # Refresh list
+                                        groups = await loop.run_in_executor(None, self.db.get_user_groups, u)
+                                        w.write(Protocol.pack(f"GROUPS|{','.join(groups)}"))
+                                        await w.drain()
+                                    except: pass
                         else:
                             writer.write(Protocol.pack(f"ERR|{res}"))
                         await writer.drain()

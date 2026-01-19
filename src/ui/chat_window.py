@@ -20,7 +20,7 @@ except ImportError:
     sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
     from core.protocol import Protocol
 
-# --- CẤU HÌNH MÀU SẮC ZALO ---
+# --- CẤU HÌNH MÀU SẮC  ---
 ZALO_BLUE = "#0068ff"
 ZALO_BG_LIGHT = "#f4f5f7"
 ZALO_BUBBLE_ME = "#e5efff"
@@ -90,6 +90,7 @@ class ChatAppClient(ctk.CTkFrame):
         self.target_name = "General" # Initial dummy target 
         self.user_list_data = [] # Store list of online users
         self.group_list_data = [] # Store list of joined groups
+        self.unread_counts = {} # Store unread messages count per group {group_name: int}
 
         # Layout 3 cột
         self.grid_columnconfigure(0, minsize=70)   # Nav
@@ -144,7 +145,7 @@ class ChatAppClient(ctk.CTkFrame):
         # Tabs
         self.btn_nav_msg = self.create_nav_btn("💬", True, lambda: self.switch_tab("MSG"), "Tin nhắn")
         self.btn_nav_contact = self.create_nav_btn("📇", False, lambda: self.switch_tab("CONTACT"), "Danh bạ")
-        self.btn_nav_todo = self.create_nav_btn("✅", False, lambda: self.switch_tab("TODO"), "Việc cần làm")
+        # self.btn_nav_todo = self.create_nav_btn("✅", False, lambda: self.switch_tab("TODO"), "Việc cần làm")
         
         # Settings
         btn_settings = ctk.CTkButton(self.nav_frame, text="⚙️", width=40, height=40, fg_color="transparent",
@@ -185,8 +186,9 @@ class ChatAppClient(ctk.CTkFrame):
     # =========================================================================
     # 2. SIDEBAR (CỘT GIỮA)
     # =========================================================================
+    # =========================================================================
     def build_sidebar(self):
-        self.side_frame = ctk.CTkFrame(self, width=320, corner_radius=0, fg_color="white")
+        self.side_frame = ctk.CTkFrame(self, width=320, corner_radius=0, fg_color=("white", "#2b2b2b"))
         self.side_frame.grid(row=0, column=1, sticky="nsew")
         self.side_frame.grid_propagate(False)
         self.side_frame.grid_rowconfigure(2, weight=1)
@@ -198,14 +200,19 @@ class ChatAppClient(ctk.CTkFrame):
         self.lbl_sidebar_title = ctk.CTkLabel(header_side, text="Tìm kiếm", font=("Segoe UI", 14, "bold"), text_color="gray")
         self.lbl_sidebar_title.pack(side="left", padx=15, pady=15)
         
-        btn_add = ctk.CTkButton(header_side, text="➕", width=30, height=30, fg_color="transparent", text_color="black", 
-                      hover_color="#eee", font=("Arial", 16), command=self.add_new_action)
-        btn_add.pack(side="right", padx=10)
-        ToolTip(btn_add, "Tạo mới")
+        btn_add = ctk.CTkButton(header_side, text="➕", width=30, height=30, fg_color="transparent", text_color=("black", "white"), 
+                      hover_color=("gray90", "gray40"), font=("Arial", 16), command=self.add_new_action)
+        btn_add.pack(side="right", padx=5)
+        ToolTip(btn_add, "Tạo nhóm mới")
+
+        btn_join = ctk.CTkButton(header_side, text="🔗", width=30, height=30, fg_color="transparent", text_color=("black", "white"), 
+                      hover_color=("gray90", "gray40"), font=("Arial", 16), command=self.join_group_action)
+        btn_join.pack(side="right", padx=5)
+        ToolTip(btn_join, "Tham gia nhóm")
 
         # Search box
-        self.entry_search = ctk.CTkEntry(self.side_frame, placeholder_text="Tìm bạn bè, tin nhắn...", height=35, 
-                                         fg_color="#eaedf0", border_width=0, text_color="black")
+        self.entry_search = ctk.CTkEntry(self.side_frame, placeholder_text="Tìm kiếm...", height=35, 
+                                         fg_color=("#eaedf0", "#3a3b3c"), border_width=0, text_color=("black", "white"))
         self.entry_search.grid(row=1, column=0, padx=15, pady=(0, 15), sticky="ew")
 
         # List Content
@@ -216,13 +223,15 @@ class ChatAppClient(ctk.CTkFrame):
     # 3. MAIN CHAT (CỘT PHẢI)
     # =========================================================================
     def build_main_chat(self):
-        self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color=ZALO_BG_LIGHT)
+
+        self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color=(ZALO_BG_LIGHT, "#1e1e1e"))
         self.main_frame.grid(row=0, column=2, sticky="nsew")
         self.main_frame.grid_rowconfigure(1, weight=1)
         self.main_frame.grid_columnconfigure(0, weight=1)
 
         # --- Header ---
-        self.header = ctk.CTkFrame(self.main_frame, height=68, corner_radius=0, fg_color="white")
+        # --- Header ---
+        self.header = ctk.CTkFrame(self.main_frame, height=68, corner_radius=0, fg_color=("white", "#2b2b2b"))
         self.header.grid(row=0, column=0, sticky="ew")
         
         ctk.CTkButton(self.header, text="👥", width=45, height=45, corner_radius=22, fg_color="#e5efff", 
@@ -230,7 +239,7 @@ class ChatAppClient(ctk.CTkFrame):
         
         info = ctk.CTkFrame(self.header, fg_color="transparent")
         info.pack(side="left", pady=10)
-        self.lbl_chat_name = ctk.CTkLabel(info, text="Phòng Chat Chung", font=("Segoe UI", 16, "bold"), text_color="black")
+        self.lbl_chat_name = ctk.CTkLabel(info, text="Phòng Chat Chung", font=("Segoe UI", 16, "bold"), text_color=("black", "white"))
         self.lbl_chat_name.pack(anchor="w")
         ctk.CTkLabel(info, text="Trực tuyến", font=("Segoe UI", 11), text_color="green").pack(anchor="w")
         
@@ -243,14 +252,22 @@ class ChatAppClient(ctk.CTkFrame):
         btn_search_msg = ctk.CTkButton(self.header, text="🔍", width=40, height=40, fg_color="transparent", text_color="#555", 
                       hover_color="#f0f0f0", font=("Segoe UI Emoji", 20), command=lambda: messagebox.showinfo("Info", "Tìm tin nhắn cũ"))
         btn_search_msg.pack(side="right")
-        ToolTip(btn_search_msg, "Tìm tin nhắn")
+        ToolTip(btn_video, "Gọi Video (Giả lập)")
+
+        # Group Action Buttons (Hidden by default)
+        self.btn_leave_group = ctk.CTkButton(self.header, text="🏃", width=40, height=40, fg_color="transparent", text_color="red",
+                                           hover_color="#ffe6e6", font=("Segoe UI Emoji", 20), command=self.leave_group_action)
+        self.btn_delete_group = ctk.CTkButton(self.header, text="🗑️", width=40, height=40, fg_color="transparent", text_color="red",
+                                            hover_color="#ffe6e6", font=("Segoe UI Emoji", 20), command=self.delete_group_action)
 
         # --- Chat Area ---
-        self.msg_area = ctk.CTkScrollableFrame(self.main_frame, fg_color=ZALO_BG_LIGHT)
+        # --- Chat Area ---
+        self.msg_area = ctk.CTkScrollableFrame(self.main_frame, fg_color=(ZALO_BG_LIGHT, "#1e1e1e"))
         self.msg_area.grid(row=1, column=0, sticky="nsew")
 
         # --- Input Area ---
-        self.input_container = ctk.CTkFrame(self.main_frame, height=140, corner_radius=0, fg_color="white")
+        # --- Input Area ---
+        self.input_container = ctk.CTkFrame(self.main_frame, height=140, corner_radius=0, fg_color=("white", "#2b2b2b"))
         self.input_container.grid(row=2, column=0, sticky="ew")
 
         # Toolbar
@@ -267,7 +284,7 @@ class ChatAppClient(ctk.CTkFrame):
         # Ô nhập
         self.entry_msg = ctk.CTkEntry(self.input_container, placeholder_text="Nhập tin nhắn...",
                                       height=45, border_width=0, fg_color="transparent", 
-                                      font=("Segoe UI", 14), text_color="black")
+                                      font=("Segoe UI", 14), text_color=("black", "white"))
         self.entry_msg.pack(fill="x", padx=10)
         self.entry_msg.bind("<Return>", self.send_msg)
 
@@ -372,6 +389,33 @@ class ChatAppClient(ctk.CTkFrame):
             # Gửi lệnh tạo nhóm
             try:
                 self.client_socket.sendall(Protocol.pack(f"GROUP_CREATE|{name}"))
+            except Exception as e:
+                messagebox.showerror("Lỗi", str(e))
+
+    def join_group_action(self):
+        dialog = ctk.CTkInputDialog(text="Nhập tên nhóm muốn tham gia:", title="Tham gia nhóm")
+        name = dialog.get_input()
+        if name:
+            try:
+                self.client_socket.sendall(Protocol.pack(f"GROUP_JOIN|{name}"))
+            except Exception as e:
+                messagebox.showerror("Lỗi", str(e))
+
+    def leave_group_action(self):
+        if self.chat_mode != "GROUP": return
+        confirm = messagebox.askyesno("Xác nhận", f"Bạn có chắc muốn rời nhóm {self.target_name}?")
+        if confirm:
+            try:
+                self.client_socket.sendall(Protocol.pack(f"GROUP_LEAVE|{self.target_name}"))
+            except Exception as e:
+                messagebox.showerror("Lỗi", str(e))
+
+    def delete_group_action(self):
+        if self.chat_mode != "GROUP": return
+        confirm = messagebox.askyesno("Xác nhận", f"Bạn có chắc muốn xóa vĩnh viễn nhóm {self.target_name}?\n(Hành động này không thể hoàn tác)")
+        if confirm:
+            try:
+                self.client_socket.sendall(Protocol.pack(f"GROUP_DELETE|{self.target_name}"))
             except Exception as e:
                 messagebox.showerror("Lỗi", str(e))
 
@@ -497,6 +541,12 @@ class ChatAppClient(ctk.CTkFrame):
                 lbl.pack(side="left", anchor="w")
                 lbl.bind("<Button-1>", lambda e, name=g: self.select_chat_target("GROUP", name))
 
+                # Notification Dot
+                count = self.unread_counts.get(g, 0)
+                if count > 0:
+                     ctk.CTkLabel(frame, text=f"{count}", width=20, height=20, corner_radius=10, 
+                                  fg_color="red", text_color="white", font=("Arial", 10, "bold")).pack(side="right", padx=5)
+
         # 2. ONLINE USERS SECTION
         ctk.CTkLabel(self.user_scroll, text="TRỰC TUYẾN", font=("Segoe UI", 11, "bold"), text_color="gray").pack(anchor="w", padx=10, pady=(15,5))
         
@@ -518,12 +568,26 @@ class ChatAppClient(ctk.CTkFrame):
         self.chat_mode = mode
         self.target_name = name
         
+        # Reset unread count
+        if mode == "GROUP" and name in self.unread_counts:
+            self.unread_counts[name] = 0
+        
         # Clear chat area (Giả lập chuyển phòng)
         for w in self.msg_area.winfo_children(): w.destroy()
         
         # Update Header
         self.lbl_chat_name.configure(text=f"Nhóm: {name}" if mode == "GROUP" else "Phòng Chat Chung")
         
+        # Toggle Group Buttons
+        if mode == "GROUP":
+            self.btn_leave_group.pack(side="right", padx=5)
+            self.btn_delete_group.pack(side="right", padx=5)
+            ToolTip(self.btn_leave_group, "Rời nhóm")
+            ToolTip(self.btn_delete_group, "Xóa nhóm (Admin)")
+        else:
+            self.btn_leave_group.pack_forget()
+            self.btn_delete_group.pack_forget()
+
         # Refresh Sidebar UI (Refresh highlight)
         self.update_user_list_ui()
 
@@ -641,7 +705,7 @@ class ChatAppClient(ctk.CTkFrame):
                     sender, content = parts[1], parts[2]
                     # Direct chat logic (hiện tại là chung)
                     if sender != self.username:
-                        self.add_message_bubble(sender, content, is_me=False, msg_type="text")
+                        self.after(0, lambda s=sender, c=content: self.add_message_bubble(s, c, is_me=False, msg_type="text"))
 
                 elif cmd == "GROUP_MSG":
                     # GROUP_MSG|group_name|sender|content
@@ -649,15 +713,17 @@ class ChatAppClient(ctk.CTkFrame):
                     
                     # Logic: Nếu đang ở trong Group đó thì hiện
                     if self.chat_mode == "GROUP" and self.target_name == g_name:
-                        self.add_message_bubble(f"{sender}", content, is_me=False, msg_type="text")
+                        self.after(0, lambda s=sender, c=content: self.add_message_bubble(f"{s}", c, is_me=False, msg_type="text"))
                     else:
-                        pass # TODO: Notification dot
+                        # Increment Unread Count
+                        self.unread_counts[g_name] = self.unread_counts.get(g_name, 0) + 1
+                        self.after(0, self.update_user_list_ui)
 
                 elif cmd == "FILE":
                     # FILE|sender|filename|b64
                     sender, filename, b64 = parts[1], parts[2], parts[3]
                     if sender != self.username:
-                        self.add_message_bubble(sender, filename, is_me=False, msg_type="file", file_data=b64)
+                        self.after(0, lambda s=sender, f=filename, b=b64: self.add_message_bubble(s, f, is_me=False, msg_type="file", file_data=b))
 
                 elif cmd == "LIST":
                     # LIST|u1,u2,...
@@ -677,6 +743,25 @@ class ChatAppClient(ctk.CTkFrame):
 
                 elif cmd == "ERR":
                     messagebox.showerror("Lỗi Server", parts[1])
+
+                elif cmd == "GROUP_LEFT":
+                    g_name = parts[1]
+                    messagebox.showinfo("Thông báo", f"Bạn đã rời nhóm {g_name}")
+                    if g_name in self.group_list_data:
+                        self.group_list_data.remove(g_name)
+                    if self.chat_mode == "GROUP" and self.target_name == g_name:
+                         self.after(0, lambda: self.select_chat_target("HOME", "General")) # Về màn hình chính
+                    self.after(0, self.update_user_list_ui)
+
+                elif cmd == "GROUP_DELETED":
+                    g_name = parts[1]
+                    if g_name in self.group_list_data:
+                        self.group_list_data.remove(g_name)
+                        # Nếu đang xem nhóm đó thì đá ra
+                        if self.chat_mode == "GROUP" and self.target_name == g_name:
+                            messagebox.showwarning("Thông báo", f"Nhóm {g_name} đã bị giải tán.")
+                            self.after(0, lambda: self.select_chat_target("HOME", "General"))
+                    self.after(0, self.update_user_list_ui)
 
             except: break
     

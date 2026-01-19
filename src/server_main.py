@@ -25,6 +25,7 @@ SECRET_KEY = "SECRET_KEY_NAO_DO_BAT_KI_RAT_DAI" # Nên để trong .env
 
 class AsyncChatServer:
     def __init__(self):
+    def __init__(self):
         self.clients = {} # {writer: username}
         self.db = DBHandler() if has_db else None
 
@@ -43,6 +44,7 @@ class AsyncChatServer:
         encoded_msg = Protocol.pack(message)
         disconnected_clients = []
 
+        # 1. TCP
         for writer in self.clients:
             if writer == exclude_writer:
                 continue
@@ -68,6 +70,32 @@ class AsyncChatServer:
         users = list(self.clients.values())
         msg = "LIST|" + ",".join(users)
         await self.broadcast(msg)
+
+    # --- HELPER: FILE SAVING (BLOCKING I/O) ---
+    def save_file_to_disk(self, file_path, b64_data):
+        import base64
+        try:
+            with open(file_path, "wb") as f:
+                f.write(base64.b64decode(b64_data))
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    async def broadcast_group(self, group_name, message, exclude_writer=None):
+        """Gửi tin nhắn chỉ cho thành viên trong nhóm"""
+        if not self.db: return
+        loop = asyncio.get_running_loop()
+        members = await loop.run_in_executor(None, self.db.get_group_members, group_name)
+        
+        encoded_msg = Protocol.pack(message)
+        
+        # 1. TCP
+        for writer, username in self.clients.items():
+            if username in members and writer != exclude_writer:
+                try:
+                    writer.write(encoded_msg)
+                    await writer.drain()
+                except: pass
 
     # --- HANDLE CLIENT ---
     async def handle_client(self, reader, writer):
@@ -140,21 +168,68 @@ class AsyncChatServer:
             print(f" [LOGIN] {username} đã tham gia.")
             await self.broadcast_user_list()
 
+            # Gửi danh sách nhóm đã tham gia
+            if self.db:
+                loop = asyncio.get_running_loop()
+                user_groups = await loop.run_in_executor(None, self.db.get_user_groups, username)
+                if user_groups:
+                    writer.write(Protocol.pack(f"GROUPS|{','.join(user_groups)}"))
+                    await writer.drain()
+
             # Vòng lặp Chat chính
             while True:
                 msg = await Protocol.recv_msg(reader)
                 if not msg: break
                 
+                # --- XỬ LÝ LỆNH ---
                 if msg.startswith("MSG|"):
                     content = msg.split("|")[1]
                     print(f"💬 [{username}]: {content}")
-                    
                     if self.db: 
                         loop = asyncio.get_running_loop()
                         await loop.run_in_executor(None, self.db.save_message, username, content, "text", None)
-                    
                     response = f"MSG|{username}|{content}"
                     await self.broadcast(response, exclude_writer=writer)
+
+                elif msg.startswith("GROUP_CREATE|"):
+                    # GROUP_CREATE|group_name
+                    g_name = msg.split("|")[1]
+                    if self.db:
+                        loop = asyncio.get_running_loop()
+                        success, res = await loop.run_in_executor(None, self.db.create_group, g_name, username)
+                        if success:
+                            writer.write(Protocol.pack(f"GROUP_OK|{g_name}"))
+                            # Gửi lại list group cập nhật
+                            user_groups = await loop.run_in_executor(None, self.db.get_user_groups, username)
+                            writer.write(Protocol.pack(f"GROUPS|{','.join(user_groups)}"))
+                        else:
+                            writer.write(Protocol.pack(f"ERR|{res}"))
+                        await writer.drain()
+
+                elif msg.startswith("GROUP_MSG|"):
+                    # GROUP_MSG|group_name|content
+                    parts = msg.split("|")
+                    if len(parts) >= 3:
+                        g_name = parts[1]
+                        content = parts[2]
+                        print(f"🛡️ [{username} -> {g_name}]: {content}")
+                        # Broadcast group
+                        await self.broadcast_group(g_name, f"GROUP_MSG|{g_name}|{username}|{content}", exclude_writer=writer)
+
+                elif msg.startswith("GROUP_JOIN|"):
+                     # GROUP_JOIN|group_name
+                    g_name = msg.split("|")[1]
+                    if self.db:
+                        loop = asyncio.get_running_loop()
+                        success, res = await loop.run_in_executor(None, self.db.add_group_member, g_name, username)
+                        if success:
+                            writer.write(Protocol.pack(f"GROUP_OK|{g_name}"))
+                            # Update group list
+                            user_groups = await loop.run_in_executor(None, self.db.get_user_groups, username)
+                            writer.write(Protocol.pack(f"GROUPS|{','.join(user_groups)}"))
+                        else:
+                            writer.write(Protocol.pack(f"ERR|{res}"))
+                        await writer.drain()
 
                 elif msg.startswith("FILE|"):
                     # FILE|filename|base64_string
@@ -169,24 +244,20 @@ class AsyncChatServer:
                         
                         file_path = f"uploads/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
                         
-                        # Lưu file
-                        try:
-                            import base64
-                            with open(file_path, "wb") as f:
-                                f.write(base64.b64decode(b64_data))
-                            
+                        # Sử dụng run_in_executor để lưu file không chặn main loop
+                        loop = asyncio.get_running_loop()
+                        success, error = await loop.run_in_executor(None, self.save_file_to_disk, file_path, b64_data)
+
+                        if success:
                             print(f"📁 [{username}] Gửi file: {filename}")
-                            
                             if self.db:
-                                loop = asyncio.get_running_loop()
                                 await loop.run_in_executor(None, self.db.save_message, username, filename, "file", file_path)
 
                             # Broadcast: FILE|username|filename|b64_data
-                            # Clients khác nhận được sẽ hiển thị và decode khi cần
                             response = f"FILE|{username}|{filename}|{b64_data}"
                             await self.broadcast(response, exclude_writer=writer)
-                        except Exception as e:
-                            print(f"[ERR] Save File Error: {e}")
+                        else:
+                            print(f"[ERR] Save File Failed: {error}")
 
         except Exception as e:
             print(f" [ERR] Lỗi xử lý client {username}: {e}")

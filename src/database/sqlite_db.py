@@ -37,6 +37,27 @@ class DBHandler:
             )
         ''')
         
+        # Bảng Groups
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE,
+                created_by TEXT,
+                created_at TEXT
+            )
+        ''')
+
+        # Bảng Group Members
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS group_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER,
+                username TEXT,
+                role TEXT,
+                UNIQUE(group_id, username)
+            )
+        ''')
+        
         # Seed Default Admin
         cursor.execute("SELECT * FROM users WHERE email='admin'")
         if not cursor.fetchone():
@@ -53,8 +74,81 @@ class DBHandler:
         conn.close()
         print(f"[DB] SQLite đã sẵn sàng tại: {self.db_path}")
 
-    # ... (省略 register_user, check_login, log_user_login) ...
+    # --- GROUP METHODS ---
+    def create_group(self, name, created_by):
+        """Tạo nhóm mới và thêm người tạo làm admin"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            now = str(datetime.datetime.now())
+            cursor.execute("INSERT INTO groups (name, created_by, created_at) VALUES (?, ?, ?)", (name, created_by, now))
+            group_id = cursor.lastrowid
+            
+            # Add creator as admin
+            cursor.execute("INSERT INTO group_members (group_id, username, role) VALUES (?, ?, ?)", (group_id, created_by, 'admin'))
+            
+            conn.commit()
+            conn.close()
+            return True, group_id
+        except sqlite3.IntegrityError:
+            return False, "Tên nhóm đã tồn tại"
+        except Exception as e:
+            return False, str(e)
 
+    def add_group_member(self, group_name, username, role='member'):
+        """Thêm thành viên vào nhóm"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Get Group ID
+            cursor.execute("SELECT id FROM groups WHERE name=?", (group_name,))
+            row = cursor.fetchone()
+            if not row: return False, "Nhóm không tồn tại"
+            group_id = row[0]
+            
+            cursor.execute("INSERT INTO group_members (group_id, username, role) VALUES (?, ?, ?)", (group_id, username, role))
+            
+            conn.commit()
+            conn.close()
+            return True, "Success"
+        except sqlite3.IntegrityError:
+            return False, "User đã ở trong nhóm"
+        except Exception as e:
+            return False, str(e)
+
+    def get_user_groups(self, username):
+        """Lấy danh sách nhóm mà user tham gia"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT g.name FROM groups g
+                JOIN group_members gm ON g.id = gm.group_id
+                WHERE gm.username = ?
+            ''', (username,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [r[0] for r in rows]
+        except: return []
+
+    def get_group_members(self, group_name):
+        """Lấy danh sách thành viên của nhóm (để broadcast)"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT gm.username FROM group_members gm
+                JOIN groups g ON g.id = gm.group_id
+                WHERE g.name = ?
+            ''', (group_name,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [r[0] for r in rows]
+        except: return []
+
+    # ... (Keep existing methods register_user, check_login, etc.) ...
     def save_message(self, sender, msg, msg_type="text", file_path=None):
         """Lưu tin nhắn (Text hoặc File) vào lịch sử"""
         try:

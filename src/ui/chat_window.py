@@ -35,10 +35,16 @@ class ToolTip:
         self.widget = widget
         self.text = text
         self.tooltip = None
-        self.widget.bind("<Enter>", self.show)
+        self.id = None
+        self.widget.bind("<Enter>", self.schedule)
         self.widget.bind("<Leave>", self.hide)
+        self.widget.bind("<ButtonPress>", self.hide)
+
+    def schedule(self, event=None):
+        self.id = self.widget.after(500, self.show) # Wait 0.5s before showing
 
     def show(self, event=None):
+        if self.tooltip: return
         try:
             x, y, _, _ = self.widget.bbox("insert")
             x += self.widget.winfo_rootx() + 25
@@ -49,12 +55,19 @@ class ToolTip:
             self.tooltip.wm_geometry(f"+{x}+{y}")
             self.tooltip.attributes("-topmost", True)
             
-            # Label
-            label = ctk.CTkLabel(self.tooltip, text=self.text, fg_color="#2b2b2b", text_color="white", corner_radius=5, height=25)
-            label.pack(padx=5, pady=2)
+            # Transparent bg for rounded effect (Workaround for CTk)
+            # CTk Toplevel doesn't support transparent corners well on all OS, 
+            # so we just make the frame black.
+            
+            label = ctk.CTkLabel(self.tooltip, text=self.text, fg_color="black", text_color="white", corner_radius=8, width=10, height=25)
+            # Add padding within label
+            label.pack(padx=1, pady=1) 
         except: pass
 
     def hide(self, event=None):
+        if self.id:
+            self.widget.after_cancel(self.id)
+            self.id = None
         if self.tooltip:
             self.tooltip.destroy()
             self.tooltip = None
@@ -70,7 +83,13 @@ class ChatAppClient(ctk.CTkFrame):
         self.server_port = port
         self.client_socket = existing_socket
         self.is_running = True
-        self.current_tab = "MSG" # Quản lý tab đang mở (MSG, CONTACT, TODO)
+        self.current_tab = "MSG"
+        
+        # --- CHAT STATE ---
+        self.chat_mode = "DIRECT" # DIRECT or GROUP
+        self.target_name = "General" # Initial dummy target 
+        self.user_list_data = [] # Store list of online users
+        self.group_list_data = [] # Store list of joined groups
 
         # Layout 3 cột
         self.grid_columnconfigure(0, minsize=70)   # Nav
@@ -339,11 +358,22 @@ class ChatAppClient(ctk.CTkFrame):
 
     def add_new_action(self):
         if self.current_tab == "MSG":
-            messagebox.showinfo("Mới", "Tạo nhóm chat mới")
+            # Tạo nhóm mới
+            self.create_group_action()
         elif self.current_tab == "CONTACT":
             messagebox.showinfo("Mới", "Thêm bạn mới")
         else:
             messagebox.showinfo("Mới", "Thêm công việc mới")
+
+    def create_group_action(self):
+        dialog = ctk.CTkInputDialog(text="Nhập tên nhóm mới:", title="Tạo nhóm")
+        name = dialog.get_input()
+        if name:
+            # Gửi lệnh tạo nhóm
+            try:
+                self.client_socket.sendall(Protocol.pack(f"GROUP_CREATE|{name}"))
+            except Exception as e:
+                messagebox.showerror("Lỗi", str(e))
 
     def dummy_video_call(self):
         win = ctk.CTkToplevel(self)
@@ -372,59 +402,130 @@ class ChatAppClient(ctk.CTkFrame):
             self.process_and_send_file(f)
 
     def process_and_send_file(self, filepath):
-        try:
-            filename = os.path.basename(filepath)
-            # Giới hạn kích thước (ví dụ 10MB) để tránh treo base64
-            if os.path.getsize(filepath) > 10 * 1024 * 1024:
-                messagebox.showwarning("File quá lớn", "Vui lòng gửi file < 10MB.")
-                # Vẫn cho gửi nếu user muốn risk? Hoặc return luôn. 
-                # Hiện tại return để an toàn.
-                return
+        """Xử lý gửi file trong luồng riêng để không treo UI"""
+        filename = os.path.basename(filepath)
+        file_size = os.path.getsize(filepath)
 
-            with open(filepath, "rb") as file:
-                b64_data = base64.b64encode(file.read()).decode('utf-8')
-            
-            # Gửi FILE|filename|b64
-            data = Protocol.pack(f"FILE|{filename}|{b64_data}")
-            self.client_socket.sendall(data)
-            
-            # Hiện bubble phía mình (dùng b64 để hiển thị preview luôn cho đồng bộ)
-            self.add_message_bubble("Bạn", filename, is_me=True, msg_type="file", file_data=b64_data)
-            
-        except Exception as e:
-            messagebox.showerror("Lỗi gửi file", str(e))
+        # 1. Check size (Limit: 200MB)
+        if file_size > 200 * 1024 * 1024:
+            messagebox.showwarning("File quá lớn", "Vui lòng chọn file nhỏ hơn 200MB.")
+            return
 
+        # 2. Thông báo đang gửi (Có thể hiện ProgressBar nếu muốn, ở đây dùng Label tạm)
+        self.lbl_chat_name.configure(text=f"Đang gửi {filename} ({round(file_size/1024/1024, 1)} MB)...")
+        # Đổi trỏ chuột để báo bận
+        self.configure(cursor="watch")
+
+        # 3. Worker Function (Chạy trong Thread)
+        def _send_worker():
+            try:
+                # Đọc và Encode (Nặng)
+                with open(filepath, "rb") as file:
+                    b64_data = base64.b64encode(file.read()).decode('utf-8')
+                
+                # Gửi qua Socket (Nặng nếu mạng chậm)
+                data = Protocol.pack(f"FILE|{filename}|{b64_data}")
+                self.client_socket.sendall(data)
+
+                # Callback Success (Về Main Thread)
+                self.after(0, lambda: self._on_send_success(filename, b64_data))
+            
+            except Exception as e:
+                # Callback Error
+                self.after(0, lambda: self._on_send_error(str(e)))
+        
+        # 4. Start Thread
+        threading.Thread(target=_send_worker, daemon=True).start()
+
+    def _on_send_success(self, filename, b64_data):
+        self.configure(cursor="")
+        self.lbl_chat_name.configure(text="Phòng Chat Chung") # Reset title
+        # Hiện bubble
+        self.add_message_bubble("Bạn", filename, is_me=True, msg_type="file", file_data=b64_data)
+        print(f"[CLIENT] Đã gửi file: {filename}")
+
+    def _on_send_error(self, error_msg):
+        self.configure(cursor="")
+        self.lbl_chat_name.configure(text="Phòng Chat Chung (Lỗi Gửi)")
+        messagebox.showerror("Lỗi gửi file", error_msg)
+
+    # --- LOGIC MẠNG (CORE) ---
     # --- LOGIC MẠNG (CORE) ---
     def send_msg(self, event=None):
         msg = self.entry_msg.get().strip()
         if not msg: return
         try:
-            # self.client_socket.send(f"MSG|{msg}".encode('utf-8'))
-            # Dùng Protocol để đóng gói
-            data = Protocol.pack(f"MSG|{msg}")
-            self.client_socket.sendall(data)
+            if self.chat_mode == "GROUP":
+                # Gửi tin nhóm: GROUP_MSG|group_name|content
+                data = Protocol.pack(f"GROUP_MSG|{self.target_name}|{msg}")
+                self.client_socket.sendall(data)
+                # Hiển thị ngay
+                self.add_message_bubble("Bạn", msg, is_me=True, msg_type="text")
+            else:
+                # Gửi tin thường (Broadcast cho mọi người như cũ)
+                data = Protocol.pack(f"MSG|{msg}")
+                self.client_socket.sendall(data)
+                self.add_message_bubble("Bạn", msg, is_me=True, msg_type="text")
             
-            self.add_message_bubble("Bạn", msg, is_me=True, msg_type="text")
             self.entry_msg.delete(0, "end")
         except: pass
 
-    def update_user_list_ui(self, user_str):
-        if self.current_tab != "MSG": return # Chỉ hiện user online khi ở tab MSG
+    def update_user_list_ui(self, user_str=None):
+        if self.current_tab != "MSG": return
         for w in self.user_scroll.winfo_children(): w.destroy()
         
-        users = user_str.split(",")
-        for u in users:
+        # 1. GROUPS SECTION
+        if self.group_list_data:
+            ctk.CTkLabel(self.user_scroll, text="NHÓM CỦA BẠN", font=("Segoe UI", 11, "bold"), text_color="gray").pack(anchor="w", padx=10, pady=(10,5))
+            for g in self.group_list_data:
+                # Active style
+                is_selected = (self.chat_mode == "GROUP" and self.target_name == g)
+                bg_color = "#e5efff" if is_selected else "transparent"
+                
+                frame = ctk.CTkFrame(self.user_scroll, fg_color=bg_color, corner_radius=6)
+                frame.pack(fill="x", pady=2, padx=5)
+                
+                # Bind click
+                frame.bind("<Button-1>", lambda e, name=g: self.select_chat_target("GROUP", name))
+                
+                btn_icon = ctk.CTkButton(frame, text="🛡️", width=35, height=35, corner_radius=10, 
+                              fg_color="#ffecd1", text_color="#d97706", hover=False)
+                btn_icon.pack(side="left", padx=10, pady=5)
+                btn_icon.bind("<Button-1>", lambda e, name=g: self.select_chat_target("GROUP", name))
+
+                lbl = ctk.CTkLabel(frame, text=g, font=("Segoe UI", 13, "bold"), text_color="black")
+                lbl.pack(side="left", anchor="w")
+                lbl.bind("<Button-1>", lambda e, name=g: self.select_chat_target("GROUP", name))
+
+        # 2. ONLINE USERS SECTION
+        ctk.CTkLabel(self.user_scroll, text="TRỰC TUYẾN", font=("Segoe UI", 11, "bold"), text_color="gray").pack(anchor="w", padx=10, pady=(15,5))
+        
+        for u in self.user_list_data:
+            frame = ctk.CTkFrame(self.user_scroll, fg_color="transparent")
+            frame.pack(fill="x", pady=2)
+            
             color = ZALO_BLUE if u == self.username else "#e6e8eb"
             txt = "white" if u == self.username else "black"
             
-            frame = ctk.CTkFrame(self.user_scroll, fg_color="transparent")
-            frame.pack(fill="x", pady=2)
             ctk.CTkButton(frame, text=u[0].upper(), width=40, height=40, corner_radius=20, 
                           fg_color=color, text_color=txt, hover=False).pack(side="left", padx=15)
             info = ctk.CTkFrame(frame, fg_color="transparent")
             info.pack(side="left")
             ctk.CTkLabel(info, text=u, font=("Segoe UI", 13, "bold"), text_color="black").pack(anchor="w")
             ctk.CTkLabel(info, text="Online", font=("Segoe UI", 11), text_color="green").pack(anchor="w")
+
+    def select_chat_target(self, mode, name):
+        self.chat_mode = mode
+        self.target_name = name
+        
+        # Clear chat area (Giả lập chuyển phòng)
+        for w in self.msg_area.winfo_children(): w.destroy()
+        
+        # Update Header
+        self.lbl_chat_name.configure(text=f"Nhóm: {name}" if mode == "GROUP" else "Phòng Chat Chung")
+        
+        # Refresh Sidebar UI (Refresh highlight)
+        self.update_user_list_ui()
 
     def add_message_bubble(self, sender, content, is_me, msg_type="text", file_data=None):
         if is_me:
@@ -527,31 +628,56 @@ class ChatAppClient(ctk.CTkFrame):
             messagebox.showerror("Lỗi lưu file", str(e))
 
     def receive_loop(self):
-        while self.is_running:
+        while self.is_running and self.client_socket:
             try:
-                # Dùng Protocol để nhận tin nhắn trọn vẹn (xử lý dính gói)
-                data = Protocol.recv_msg_sync(self.client_socket)
+                msg = Protocol.recv_msg_sync(self.client_socket)
+                if not msg: break
                 
-                if not data: break
-                
-                if data.startswith("MSG|"):
-                    parts = data.split("|")
-                    if len(parts) >= 3:
-                        sender = parts[1]
-                        content = "|".join(parts[2:]) # Handle nội dung có chứa ký tự |
-                        self.add_message_bubble(sender, content, is_me=False, msg_type="text")
-                
-                elif data.startswith("FILE|"):
-                    # FILE|sender|filename|b64
-                    parts = data.split("|")
-                    if len(parts) >= 4:
-                        sender = parts[1]
-                        filename = parts[2]
-                        b64_data = parts[3]
-                        self.add_message_bubble(sender, filename, is_me=False, msg_type="file", file_data=b64_data)
+                parts = msg.split("|")
+                cmd = parts[0]
 
-                elif data.startswith("LIST|"):
-                    self.update_user_list_ui(data.split("|")[1])
+                if cmd == "MSG":
+                    # MSG|sender|content
+                    sender, content = parts[1], parts[2]
+                    # Direct chat logic (hiện tại là chung)
+                    if sender != self.username:
+                        self.add_message_bubble(sender, content, is_me=False, msg_type="text")
+
+                elif cmd == "GROUP_MSG":
+                    # GROUP_MSG|group_name|sender|content
+                    g_name, sender, content = parts[1], parts[2], parts[3]
+                    
+                    # Logic: Nếu đang ở trong Group đó thì hiện
+                    if self.chat_mode == "GROUP" and self.target_name == g_name:
+                        self.add_message_bubble(f"{sender}", content, is_me=False, msg_type="text")
+                    else:
+                        pass # TODO: Notification dot
+
+                elif cmd == "FILE":
+                    # FILE|sender|filename|b64
+                    sender, filename, b64 = parts[1], parts[2], parts[3]
+                    if sender != self.username:
+                        self.add_message_bubble(sender, filename, is_me=False, msg_type="file", file_data=b64)
+
+                elif cmd == "LIST":
+                    # LIST|u1,u2,...
+                    if len(parts) > 1:
+                        self.user_list_data = parts[1].split(",")
+                        self.after(0, self.update_user_list_ui)
+
+                elif cmd == "GROUPS":
+                    # GROUPS|g1,g2,...
+                    if len(parts) > 1:
+                        self.group_list_data = parts[1].split(",") if parts[1] else []
+                        self.after(0, self.update_user_list_ui)
+
+                elif cmd == "GROUP_OK":
+                    g_name = parts[1]
+                    messagebox.showinfo("Thành công", f"Đã tham gia nhóm {g_name}")
+
+                elif cmd == "ERR":
+                    messagebox.showerror("Lỗi Server", parts[1])
+
             except: break
     
     def open_image_viewer(self, pil_image, filename):

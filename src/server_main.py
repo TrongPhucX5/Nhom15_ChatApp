@@ -198,13 +198,45 @@ class AsyncChatServer:
                 
                 # --- XỬ LÝ LỆNH ---
                 if msg.startswith("MSG|"):
-                    content = msg.split("|")[1]
-                    print(f"💬 [{username}]: {content}")
-                    if self.db: 
+                     # Format: MSG|receiver|content  (Original was MSG|content, need to support both or migrate)
+                     # Old format: MSG|content (Broadcast to all?) -> Not good.
+                     # CURRENT CLIENT sends: MSG|content (Line 629 of chat_window.py)
+                     # WAIT: If client sends MSG|content, receiver is Unknown?
+                     # No, previous logic was Broadcast All.
+                     # Let's support: MSG|content (Broadcast All - Deprecated but support)
+                     # OR: MSG|receiver|content
+                     parts = msg.split("|")
+                     if len(parts) == 2:
+                         # broadcast layout
+                         content = parts[1]
+                         receiver = "General" # Treat broadcast as General room
+                     else:
+                         receiver, content = parts[1], parts[2]
+
+                     print(f"💬 [{username} -> {receiver}]: {content}")
+                     
+                     if self.db: 
                         loop = asyncio.get_running_loop()
-                        await loop.run_in_executor(None, self.db.save_message, username, content, "text", None)
-                    response = f"MSG|{username}|{content}"
-                    await self.broadcast(response, exclude_writer=writer)
+                        await loop.run_in_executor(None, self.db.save_message, username, receiver, content, "text", None)
+                     
+                     # Check if receiver is "General" -> Broadcast (exclude sender)
+                     if receiver == "General":
+                         response = f"MSG|{username}|{content}"
+                         await self.broadcast(response, exclude_writer=writer)
+                     else:
+                         # Private Message
+                         # Find receiver writer
+                         found = False
+                         for w, u in self.clients.items():
+                             if u == receiver:
+                                 # Send to receiver: MSG|sender|content
+                                 w.write(Protocol.pack(f"MSG|{username}|{content}"))
+                                 await w.drain()
+                                 found = True
+                                 break
+                         # Also echo back to sender so they know it sent? 
+                         # Actually Client handles "Add bubble" immediately.
+                         
 
                 elif msg.startswith("GROUP_CREATE|"):
                     # GROUP_CREATE|group_name
@@ -228,6 +260,12 @@ class AsyncChatServer:
                         g_name = parts[1]
                         content = parts[2]
                         print(f"🛡️ [{username} -> {g_name}]: {content}")
+                        
+                        # Save to DB
+                        if self.db:
+                            loop = asyncio.get_running_loop()
+                            await loop.run_in_executor(None, self.db.save_message, username, g_name, content, "text", None)
+
                         # Broadcast group
                         await self.broadcast_group(g_name, f"GROUP_MSG|{g_name}|{username}|{content}", exclude_writer=writer)
 
@@ -239,6 +277,9 @@ class AsyncChatServer:
                         success, res = await loop.run_in_executor(None, self.db.add_group_member, g_name, username)
                         if success:
                             writer.write(Protocol.pack(f"GROUP_OK|{g_name}"))
+                            # Broadcast Notify
+                            await self.broadcast_group(g_name, f"GROUP_NOTIFY|{g_name}|{username} đã tham gia.", exclude_writer=writer)
+                            
                             # Update group list
                             user_groups = await loop.run_in_executor(None, self.db.get_user_groups, username)
                             writer.write(Protocol.pack(f"GROUPS|{','.join(user_groups)}"))
@@ -253,7 +294,9 @@ class AsyncChatServer:
                         success, res = await loop.run_in_executor(None, self.db.remove_group_member, g_name, username)
                         if success:
                             writer.write(Protocol.pack(f"GROUP_LEFT|{g_name}"))
-                            await self.broadcast_group(g_name, f"GROUP_MSG|{g_name}|System|{username} đã rời nhóm.", exclude_writer=writer)
+                            # Message System: Notify
+                            await self.broadcast_group(g_name, f"GROUP_NOTIFY|{g_name}|{username} đã rời nhóm.", exclude_writer=writer)
+                            
                             user_groups = await loop.run_in_executor(None, self.db.get_user_groups, username)
                             writer.write(Protocol.pack(f"GROUPS|{','.join(user_groups)}"))
                         else:
@@ -281,6 +324,64 @@ class AsyncChatServer:
                             writer.write(Protocol.pack(f"ERR|{res}"))
                         await writer.drain()
 
+                        await writer.drain()
+
+                # --- HISTORY COMMAND ---
+                elif msg.startswith("CMD_HISTORY|"):
+                    # CMD_HISTORY|target
+                    target = msg.split("|")[1]
+                    if self.db:
+                        loop = asyncio.get_running_loop()
+                        
+                        # Check if target is group
+                        # Simple heuristic: Check if target is in user's groups or if it's a known user
+                        # But simpler: Client knows contexts (Group/Private).
+                        # Let's assume target is the name.
+                        # If target exists in Groups table -> Group History
+                        # Else -> Private History (target is other user)
+                        
+                        # Wait, "General" is a special case?
+                        # If target == "General" -> get messages with receiver='General'
+                        
+                        # We need a proper way to distinguish.
+                        # Protocol update: CMD_HISTORY|mode|target
+                        # Let's try to parse len(parts)
+                        parts = msg.split("|")
+                        mode = "PRIVATE"
+                        if len(parts) >= 3:
+                             mode = parts[2] # PRIVATE or GROUP
+                        else:
+                             # Legacy/compat attempt if client sends old format (unlikely here)
+                             pass 
+                        
+                        history = []
+                        if mode == "GROUP" or target == "General":
+                             history = await loop.run_in_executor(None, self.db.get_group_history, target)
+                        else:
+                             history = await loop.run_in_executor(None, self.db.get_history, username, target)
+                        
+                        # Build JSON or pipe-delimited list
+                        # Let's use JSON for complexity? Or simple list.
+                        # HISTORY_DATA|json_string
+                        # JSON structure: [{"sender": s, "content": c, "timestamp": t, "type": type, "file": f}, ...]
+                        import json
+                        hist_data = []
+                        for row in history:
+                            # row: sender, content, timestamp, msg_type, file_path
+                            hist_data.append({
+                                "sender": row[0], 
+                                "content": row[1], 
+                                "timestamp": row[2], 
+                                "type": row[3], 
+                                "file": row[4]
+                            })
+                        
+                        json_str = json.dumps(hist_data)
+                        # Pack might fail if too long? 
+                        # We send normally.
+                        
+                        # Send in chunks if needed? For now send all.
+                        writer.write(Protocol.pack(f"HISTORY_DATA|{target}|{json_str}"))
                         await writer.drain()
 
                 # --- USER MANAGEMENT ---

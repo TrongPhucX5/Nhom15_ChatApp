@@ -32,17 +32,23 @@ class DBHandler:
             conn.execute("ALTER TABLE users ADD COLUMN avatar TEXT")
         except: pass
         
-        # Bảng Messages (Cập nhật cho chat_v2: thêm msg_type, file_path)
+        # Bảng Messages (Cập nhật cho chat_v2: thêm msg_type, file_path, receiver)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sender TEXT,
+                receiver TEXT,
                 content TEXT,
                 timestamp TEXT,
                 msg_type TEXT DEFAULT 'text',
                 file_path TEXT
             )
         ''')
+        
+        # Migration: Add receiver column if not exists
+        try:
+            conn.execute("ALTER TABLE messages ADD COLUMN receiver TEXT")
+        except: pass
         
         # Bảng Groups
         cursor.execute('''
@@ -197,23 +203,65 @@ class DBHandler:
         except: return []
 
     # ... (Keep existing methods register_user, check_login, etc.) ...
-    def save_message(self, sender, msg, msg_type="text", file_path=None):
+    # ... (Keep existing methods register_user, check_login, etc.) ...
+    def save_message(self, sender, receiver, msg, msg_type="text", file_path=None):
         """Lưu tin nhắn (Text hoặc File) vào lịch sử"""
         try:
             conn = sqlite3.connect(self.db_path, timeout=30)
             cursor = conn.cursor()
             
-            now = str(datetime.datetime.now())
-            
+            now = datetime.datetime.now().strftime("%H:%M") # Just HH:MM for now, or full time? DB usually stores full time.
+            # Let's store full timestamp for sorting, client formats to HH:MM
+            now_full = str(datetime.datetime.now())
+
             cursor.execute('''
-                INSERT INTO messages (sender, content, timestamp, msg_type, file_path)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (sender, msg, now, msg_type, file_path))
+                INSERT INTO messages (sender, receiver, content, timestamp, msg_type, file_path)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (sender, receiver, msg, now_full, msg_type, file_path))
             
             conn.commit()
             conn.close()
         except Exception as e:
             print(f"[DB] Lỗi save_message: {e}")
+
+    def get_history(self, user1, user2, limit=50):
+        """Lấy lịch sử chat riêng giữa 2 user"""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            cursor = conn.cursor()
+            
+            # Query messages where (sender=u1 AND receiver=u2) OR (sender=u2 AND receiver=u1)
+            cursor.execute('''
+                SELECT sender, content, timestamp, msg_type, file_path 
+                FROM messages 
+                WHERE (sender=? AND receiver=?) OR (sender=? AND receiver=?)
+                ORDER BY id DESC LIMIT ?
+            ''', (user1, user2, user2, user1, limit))
+            
+            rows = cursor.fetchall()
+            conn.close()
+            # Reverse to return oldest first -> Client appends to bottom
+            return rows[::-1] 
+        except: return []
+
+    def get_group_history(self, group_name, limit=50):
+        """Lấy lịch sử chat nhóm"""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            cursor = conn.cursor()
+            
+            # Query messages where receiver=group_name
+            cursor.execute('''
+                SELECT sender, content, timestamp, msg_type, file_path
+                FROM messages
+                WHERE receiver=?
+                ORDER BY id DESC LIMIT ?
+            ''', (group_name, limit))
+            
+            rows = cursor.fetchall()
+            conn.close()
+            return rows[::-1]
+        except: return []
 
     def register_user(self, email, password, username):
         """Đăng ký tài khoản mới"""

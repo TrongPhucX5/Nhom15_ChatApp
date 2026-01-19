@@ -695,6 +695,12 @@ class ChatAppClient(ctk.CTkFrame):
                           command=cmd)
             btn_avatar.pack(side="left", padx=10, pady=8)
             
+            # Notification Dot (Unread)
+            count = self.unread_counts.get(u, 0)
+            if count > 0:
+                 ctk.CTkLabel(inner_frame, text=f"{count}", width=22, height=22, corner_radius=11, 
+                              fg_color="red", text_color="white", font=("Arial", 10, "bold")).pack(side="right", padx=10)
+            
             # Info (Pack Second)
             info = ctk.CTkFrame(inner_frame, fg_color="transparent")
             info.pack(side="left", fill="x", expand=True)
@@ -718,7 +724,8 @@ class ChatAppClient(ctk.CTkFrame):
         self.target_name = name
         
         # Reset unread count
-        if mode == "GROUP" and name in self.unread_counts:
+        # Reset unread count
+        if name in self.unread_counts:
             self.unread_counts[name] = 0
         
         # Clear chat area (Giả lập chuyển phòng)
@@ -731,6 +738,13 @@ class ChatAppClient(ctk.CTkFrame):
             self.lbl_chat_name.configure(text=f"Chat với: {name}")
         else:
             self.lbl_chat_name.configure(text="Phòng Chat Chung")
+            
+        # Request History
+        if mode in ["GROUP", "PRIVATE"]:
+             # Send CMD_HISTORY|target|mode
+             try:
+                 self.client_socket.sendall(Protocol.pack(f"CMD_HISTORY|{name}|{mode}"))
+             except: pass
         
         # Toggle Group Buttons
         if mode == "GROUP":
@@ -745,7 +759,7 @@ class ChatAppClient(ctk.CTkFrame):
         # Refresh Sidebar UI (Refresh highlight)
         self.update_user_list_ui()
 
-    def add_message_bubble(self, sender, content, is_me, msg_type="text", file_data=None):
+    def add_message_bubble(self, sender, content, is_me, msg_type="text", file_data=None, timestamp_str=None):
         if is_me:
             bg, align, anchor = ZALO_BUBBLE_ME, "right", "e"
             txt_col = TEXT_COLOR_ME
@@ -773,7 +787,7 @@ class ChatAppClient(ctk.CTkFrame):
         if msg_type == "text":
             # Font size 13, consistent padding
             msg_font = ("Segoe UI", 13)
-            ctk.CTkLabel(bubble, text=content, font=msg_font, text_color=txt_col, wraplength=480, justify="left").pack(padx=12, pady=8)
+            ctk.CTkLabel(bubble, text=content, font=msg_font, text_color=txt_col, wraplength=480, justify="left").pack(padx=12, pady=(8, 2))
         
         elif msg_type == "file":
             filename = content
@@ -840,6 +854,29 @@ class ChatAppClient(ctk.CTkFrame):
                 else:
                     ctk.CTkLabel(bubble, text="Đã gửi", font=("Segoe UI", 10), text_color="gray").pack(padx=12, pady=5, anchor="w")
 
+        # --- Timestamp ---
+        # --- Timestamp ---
+        # Fainter timestamp, small font
+        import datetime
+        
+        # Parse timestamp from DB or use current
+        ts = ""
+        if timestamp_str:
+            # DB might return "YYYY-MM-DD HH:MM:SS.ssss"
+            # We want HH:MM
+            try:
+                # Assuming format "YYYY-MM-DD HH:MM:SS..."
+                dt = datetime.datetime.strptime(timestamp_str.split('.')[0], "%Y-%m-%d %H:%M:%S")
+                ts = dt.strftime("%H:%M")
+            except:
+                ts = timestamp_str # Fallback
+        else:
+            ts = datetime.datetime.now().strftime("%H:%M")
+
+        # sub_col was defined above, but we want it even fainter if possible
+        ts_col = "#999999" if not is_me else "#B0C4DE" # Light gray for others, Light Blue Gray for me
+        ctk.CTkLabel(bubble, text=ts, font=("Segoe UI", 9), text_color=ts_col).pack(anchor="e", padx=10, pady=(0, 4))
+
         # Smart Auto-scroll
         # Only scroll if user is near bottom (e.g. within last 10%)
         # But if it's MY message, always scroll.
@@ -849,6 +886,19 @@ class ChatAppClient(ctk.CTkFrame):
                  self.msg_area._parent_canvas.yview_moveto(1.0)
         except:
              pass
+
+    def add_system_message(self, text):
+        """Displays a centered system notification in the chat."""
+        frame = ctk.CTkFrame(self.msg_area, fg_color="transparent")
+        frame.pack(fill="x", pady=(10, 10)) # Increased vertical margin for less noise
+        
+        lbl = ctk.CTkLabel(frame, text=text, font=("Segoe UI", 11), text_color="gray50")
+        lbl.pack(anchor="center")
+        
+        # Auto scroll for system messages too
+        try:
+             self.msg_area._parent_canvas.yview_moveto(1.0)
+        except: pass
 
     def save_file_local(self, filename, b64_data):
         try:
@@ -873,9 +923,16 @@ class ChatAppClient(ctk.CTkFrame):
                 if cmd == "MSG":
                     # MSG|sender|content
                     sender, content = parts[1], parts[2]
-                    # Direct chat logic (hiện tại là chung)
+                    
                     if sender != self.username:
-                        self.after(0, lambda s=sender, c=content: self.add_message_bubble(s, c, is_me=False, msg_type="text"))
+                        # Logic Chat 1-1 (Giả lập Private từ Broadcast)
+                        # Chỉ hiển thị nếu đang chat với đúng người này
+                        if self.chat_mode == "PRIVATE" and self.target_name == sender:
+                             self.after(0, lambda s=sender, c=content: self.add_message_bubble(s, c, is_me=False, msg_type="text"))
+                        else:
+                             # Nếu đang ở nhóm hoặc người khác -> Tính là tin nhắn chờ (Unread)
+                             self.unread_counts[sender] = self.unread_counts.get(sender, 0) + 1
+                             self.after(0, self.update_user_list_ui)
 
                 elif cmd == "GROUP_MSG":
                     # GROUP_MSG|group_name|sender|content
@@ -903,6 +960,13 @@ class ChatAppClient(ctk.CTkFrame):
                          if sender != self.username:
                              if (self.chat_mode == "GROUP" and self.target_name == g_name) or (self.chat_mode == "PRIVATE" and g_name == "General"):
                                   self.after(0, lambda s=sender: self.show_typing_label(s))
+
+                elif cmd == "GROUP_NOTIFY":
+                    # GROUP_NOTIFY|group_name|content
+                    g_name, notify_content = parts[1], parts[2]
+                    # Show if in that group
+                    if self.chat_mode == "GROUP" and self.target_name == g_name:
+                        self.after(0, lambda t=notify_content: self.add_system_message(t))
 
                 elif cmd == "LIST":
                     # LIST|u1,u2,...
@@ -945,6 +1009,33 @@ class ChatAppClient(ctk.CTkFrame):
                 elif cmd == "CMD_RES":
                     # CMD_RES|TYPE|STATUS|MSG
                     res_type, status, msg_content = parts[2], parts[3], parts[4]
+                    if res_type == "PASS" and status == "True":
+                        messagebox.showinfo("Thành công", "Đổi mật khẩu thành công")
+                    elif res_type == "PASS":
+                        messagebox.showerror("Lỗi", msg_content)
+
+                elif cmd == "HISTORY_DATA":
+                    # HISTORY_DATA|target|json_str
+                    # target = parts[1] # Not actually needed if we trust the flow
+                    # json_str is the rest (could contain pipes, so be careful with split)
+                    # Use index to split
+                    # msg is "HISTORY_DATA|target|json..."
+                    try:
+                        first_pipe = msg.find("|")
+                        second_pipe = msg.find("|", first_pipe + 1)
+                        json_str = msg[second_pipe+1:]
+                        
+                        import json
+                        history = json.loads(json_str)
+                        
+                        # Only render if still looking at that target?
+                        # Yes, or just render to current buffer. 
+                        # Ideally check target matches self.target_name.
+                        
+                        # Render loop
+                        self.after(0, lambda h=history: self.render_history(h))
+                    except Exception as e:
+                        print(f"Error parsing history: {e}")
                     
                     if res_type == "PASS":
                         if status == "True": messagebox.showinfo("Thành công", msg_content)
@@ -1039,6 +1130,22 @@ class ChatAppClient(ctk.CTkFrame):
             self.on_logout_callback()
         else:
             self.destroy()
+
+    def render_history(self, history):
+        """Hiển thị danh sách tin nhắn lịch sử"""
+        for msg in history:
+            sender = msg.get('sender', 'Unknown')
+            content = msg.get('content', '')
+            timestamp = msg.get('timestamp', '')
+            msg_type = msg.get('type', 'text')
+            
+            is_me = (sender == self.username)
+            self.add_message_bubble(sender, content, is_me, msg_type, file_data=None, timestamp_str=timestamp)
+        
+        # Force scroll to bottom after loading history
+        try:
+            self.msg_area._parent_canvas.yview_moveto(1.0)
+        except: pass
 
 # if __name__ == "__main__":
 #     # Standalone testing not supported without MainApp

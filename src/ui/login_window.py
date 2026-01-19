@@ -156,7 +156,7 @@ class LoginWindow(ctk.CTkFrame):
             # messagebox.showinfo("Thành công", f"Chào mừng {username}!")
             # Gọi callback để chuyển màn hình
             if self.on_login_success:
-                self.on_login_success(username, self.sock)
+                self.on_login_success(username, self.sock, email, pwd)
         else:
             # AUTH|FAIL|Reason
             reason = response.split("|")[2] if response else "Mất kết nối server"

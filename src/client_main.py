@@ -26,7 +26,9 @@ class MainApp(ctk.CTk):
         # Dictionary lưu trạng thái username/socket khi chuyển màn hình
         self.session_data = {
             "username": None,
-            "socket": None
+            "socket": None,
+            "email": None,
+            "password": None
         }
 
         self.show_login()
@@ -43,9 +45,11 @@ class MainApp(ctk.CTk):
         login_screen = LoginWindow(master=self.container, on_login_success=self.on_login_success)
         login_screen.pack(fill="both", expand=True)
 
-    def on_login_success(self, username, sock):
+    def on_login_success(self, username, sock, email, password):
         self.session_data["username"] = username
         self.session_data["socket"] = sock
+        self.session_data["email"] = email
+        self.session_data["password"] = password
         
         print(f"[SYSTEM] Đăng nhập thành công: {username}")
         self.show_chat()
@@ -59,7 +63,9 @@ class MainApp(ctk.CTk):
             master=self.container,
             username_from_login=self.session_data["username"],
             existing_socket=self.session_data["socket"],
-            on_logout_callback=self.on_logout
+            on_logout_callback=self.on_logout,
+            email=self.session_data["email"],
+            password=self.session_data["password"]
         )
         chat_screen.pack(fill="both", expand=True)
 
@@ -74,14 +80,23 @@ class MainApp(ctk.CTk):
         self.show_login()
 
     def on_close(self):
+        print("[MAIN] Closing application...")
         # Đóng socket nếu có
         sock = self.session_data.get("socket")
         if sock:
             try: sock.close()
             except: pass
         self.destroy()
+        print("[MAIN] Application destroyed.")
 
 if __name__ == "__main__":
-    app = MainApp()
-    app.protocol("WM_DELETE_WINDOW", app.on_close)
-    app.mainloop()
+    try:
+        app = MainApp()
+        app.protocol("WM_DELETE_WINDOW", app.on_close)
+        app.mainloop()
+    except Exception as e:
+        print(f"\n[FATAL CRASH] {e}")
+        import traceback
+        traceback.print_exc()
+        import time
+        time.sleep(10) # Dừng lại để xem lỗi

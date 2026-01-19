@@ -76,16 +76,20 @@ class ToolTip:
             self.tooltip = None
 
 class ChatAppClient(ctk.CTkFrame):
-    def __init__(self, master, username_from_login=None, host='127.0.0.1', port=65432, existing_socket=None, on_logout_callback=None):
+    def __init__(self, master, username_from_login=None, host='127.0.0.1', port=65432, existing_socket=None, on_logout_callback=None, email=None, password=None):
         super().__init__(master)
         
         # --- DATA ---
         self.on_logout_callback = on_logout_callback
         self.username = username_from_login or "User"
+        self.email = email
+        self.password = password
+        self.username = username_from_login or "User"
         self.server_host = host
         self.server_port = port
         self.client_socket = existing_socket
         self.is_running = True
+        self.connect_state = "CONNECTED" # CONNECTED, RECONNECTING
         self.current_tab = "MSG"
         
         # --- CHAT STATE ---
@@ -94,6 +98,7 @@ class ChatAppClient(ctk.CTkFrame):
         self.user_list_data = [] # Store list of online users
         self.group_list_data = [] # Store list of joined groups
         self.unread_counts = {} # Store unread messages count per group {group_name: int}
+        self.msg_status_queues = {} # {receiver_name: [label1, label2, ...]}
 
         # Layout 3 cột
         self.grid_columnconfigure(0, minsize=70)   # Nav
@@ -102,16 +107,27 @@ class ChatAppClient(ctk.CTkFrame):
         self.grid_rowconfigure(0, weight=1)
 
         # Kết nối
-        if not self.connect_server(): return
-
-        # Xây dựng giao diện
+        if not self.connect_server():
+            print("[CLIENT] Initial connection failed. Entering RECONNECTING state.")
+            self.connect_state = "RECONNECTING"
+        
+        # Xây dựng giao diện (luôn xây dựng)
         self.build_nav_bar()
         self.build_sidebar()
         self.build_main_chat()
         
-        # Thread nhận tin
-        self.recv_thread = threading.Thread(target=self.receive_loop, daemon=True)
-        self.recv_thread.start()
+        if self.connect_state == "RECONNECTING":
+            # Nếu chưa connect được, báo UI đang đợi
+            self.after(0, self._ui_on_disconnect)
+            threading.Thread(target=self.reconnect_loop, daemon=True).start()
+        else:
+            # Thread nhận tin
+            self.recv_thread = threading.Thread(target=self.receive_loop, daemon=True)
+            self.recv_thread.start()
+
+            # Thread Heartbeat (Ping)
+            self.heartbeat_thread = threading.Thread(target=self.heartbeat_loop, daemon=True)
+            self.heartbeat_thread.start()
 
     def connect_server(self):
         # Nếu đã có socket (từ Login truyền sang) thì dùng luôn
@@ -122,12 +138,80 @@ class ChatAppClient(ctk.CTkFrame):
             self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.client_socket.connect((self.server_host, self.server_port))
             # Gửi LOGIN dùng Protocol
-            msg = Protocol.pack(f"LOGIN|{self.username}")
-            self.client_socket.sendall(msg)
-            return True
+            # msg = Protocol.pack(f"LOGIN|{self.username}") # Legacy
+            # Use AUTH|LOGIN if we have credentials, else fallback or fail
+            if self.email and self.password:
+                msg = Protocol.pack(f"AUTH|LOGIN|{self.email}|{self.password}")
+                self.client_socket.sendall(msg)
+                
+                # Check response synchronously
+                resp = Protocol.recv_msg_sync(self.client_socket)
+                if resp and resp.startswith("AUTH|SUCCESS"):
+                    return True
+                else:
+                     return False
+            else:
+                # Fallback for dev/legacy without strict auth
+                msg = Protocol.pack(f"LOGIN|{self.username}")
+                self.client_socket.sendall(msg)
+                return True
         except Exception as e:
-            messagebox.showerror("Lỗi", f"Không kết nối được Server!\n{e}")
-            self.destroy()
+            # messagebox.showerror("Lỗi", f"Không kết nối được Server!\n{e}")
+            # Suppress error in reconnect loop
+            return False
+
+    def handle_disconnect(self):
+        if self.connect_state == "RECONNECTING": return
+        self.connect_state = "RECONNECTING"
+        print("[CLIENT] Lost connection. Reconnecting...")
+        
+        # UI Update (Thread Safe)
+        self.after(0, self._ui_on_disconnect)
+        
+        self.client_socket = None
+        
+        # Start Reconnect Thread
+        threading.Thread(target=self.reconnect_loop, daemon=True).start()
+    
+    def _ui_on_disconnect(self):
+        try:
+            now = datetime.datetime.now().strftime("%H:%M:%S")
+            self.lbl_chat_name.configure(text=f"🔄 Waiting for server... [{now}]")
+            self.entry_msg.configure(state="disabled")
+            self.btn_send.configure(state="disabled")
+        except Exception as e:
+            print(f"Error updating UI on disconnect: {e}")
+
+    def reconnect_loop(self):
+        import time
+        while self.is_running and self.connect_state == "RECONNECTING":
+            time.sleep(5) # Wait 5s
+            print("[CLIENT] Attempting reconnect...")
+            if self.connect_server():
+                print("[CLIENT] Reconnect Success!")
+                self.connect_state = "CONNECTED"
+                
+                # Restore UI (Thread Safe)
+                self.after(0, self._ui_on_reconnect)
+                
+                # Re-start threads
+                self.recv_thread = threading.Thread(target=self.receive_loop, daemon=True)
+                self.recv_thread.start()
+                
+                if not self.heartbeat_thread or not self.heartbeat_thread.is_alive():
+                     self.heartbeat_thread = threading.Thread(target=self.heartbeat_loop, daemon=True)
+                     self.heartbeat_thread.start()
+                
+                break # Exit reconnect loop
+
+    def _ui_on_reconnect(self):
+        try:
+            # select_chat_target already handles header text and history reload
+            self.select_chat_target(self.chat_mode, self.target_name)
+            self.entry_msg.configure(state="normal")
+            self.btn_send.configure(state="normal")
+        except Exception as e:
+            print(f"Error restoring UI: {e}")
             return False
 
     # =========================================================================
@@ -625,10 +709,20 @@ class ChatAppClient(ctk.CTkFrame):
                 # Hiển thị ngay
                 self.add_message_bubble("Bạn", msg, is_me=True, msg_type="text")
             else:
-                # Gửi tin thường (Broadcast cho mọi người như cũ)
-                data = Protocol.pack(f"MSG|{msg}")
+                # Private or General
+                target = self.target_name if self.target_name else "General"
+                # Protocol: MSG|receiver|content
+                data = Protocol.pack(f"MSG|{target}|{msg}")
                 self.client_socket.sendall(data)
-                self.add_message_bubble("Bạn", msg, is_me=True, msg_type="text")
+                
+                lbl = self.add_message_bubble("Bạn", msg, is_me=True, msg_type="text")
+                
+                # Queue for status update (Only for Private)
+                if self.chat_mode == "PRIVATE" and target != "General":
+                    if target not in self.msg_status_queues:
+                        self.msg_status_queues[target] = []
+                    # Append (Store weakref or just ref? Ref is fine as bubble exists)
+                    if lbl: self.msg_status_queues[target].append(lbl)
             
             self.entry_msg.delete(0, "end")
         except: pass
@@ -854,28 +948,34 @@ class ChatAppClient(ctk.CTkFrame):
                 else:
                     ctk.CTkLabel(bubble, text="Đã gửi", font=("Segoe UI", 10), text_color="gray").pack(padx=12, pady=5, anchor="w")
 
-        # --- Timestamp ---
-        # --- Timestamp ---
-        # Fainter timestamp, small font
+        # --- TIME & STATUS FRAME ---
+        info_frame = ctk.CTkFrame(bubble, fg_color="transparent")
+        info_frame.pack(anchor="e", padx=10, pady=(0, 4))
+
+        # 1. Timestamp
         import datetime
-        
-        # Parse timestamp from DB or use current
         ts = ""
         if timestamp_str:
-            # DB might return "YYYY-MM-DD HH:MM:SS.ssss"
-            # We want HH:MM
             try:
-                # Assuming format "YYYY-MM-DD HH:MM:SS..."
                 dt = datetime.datetime.strptime(timestamp_str.split('.')[0], "%Y-%m-%d %H:%M:%S")
                 ts = dt.strftime("%H:%M")
-            except:
-                ts = timestamp_str # Fallback
+            except: ts = timestamp_str
         else:
             ts = datetime.datetime.now().strftime("%H:%M")
 
-        # sub_col was defined above, but we want it even fainter if possible
-        ts_col = "#999999" if not is_me else "#B0C4DE" # Light gray for others, Light Blue Gray for me
-        ctk.CTkLabel(bubble, text=ts, font=("Segoe UI", 9), text_color=ts_col).pack(anchor="e", padx=10, pady=(0, 4))
+        ts_col = "#999999" if not is_me else "#B0C4DE"
+        ctk.CTkLabel(info_frame, text=ts, font=("Segoe UI", 9), text_color=ts_col).pack(side="left")
+
+        # 2. Status Icon (Only for Me & Private Chat)
+        status_lbl = None
+        if is_me and self.chat_mode == "PRIVATE":
+             # If timestamp_str is present (loaded from history), assume Sent (✔)
+             # If None (sending live), assume Pending (...)
+             code = "✔" if timestamp_str else "..." 
+             status_lbl = ctk.CTkLabel(info_frame, text=code, font=("Arial", 10, "bold"), text_color=ts_col)
+             status_lbl.pack(side="left", padx=(3, 0))
+        
+        return status_lbl # Return for queuing
 
         # Smart Auto-scroll
         # Only scroll if user is near bottom (e.g. within last 10%)
@@ -913,9 +1013,13 @@ class ChatAppClient(ctk.CTkFrame):
 
     def receive_loop(self):
         while self.is_running and self.client_socket:
+            res_type = None # Initialize to avoid UnboundLocalError
             try:
                 msg = Protocol.recv_msg_sync(self.client_socket)
-                if not msg: break
+                if not msg:
+                    print("[CLIENT] Server closed connection.")
+                    self.handle_disconnect()
+                    break
                 
                 parts = msg.split("|")
                 cmd = parts[0]
@@ -957,8 +1061,11 @@ class ChatAppClient(ctk.CTkFrame):
                      if len(parts) >= 3:
                          g_name, sender = parts[1], parts[2]
                          # Check context and self
+                         # Check context and self
                          if sender != self.username:
-                             if (self.chat_mode == "GROUP" and self.target_name == g_name) or (self.chat_mode == "PRIVATE" and g_name == "General"):
+                             # Allow General typing (if supported) OR Group typing OR Private Typing (sender == target_name)
+                             if (self.chat_mode == "GROUP" and self.target_name == g_name) or \
+                                (self.chat_mode == "PRIVATE" and (g_name == "General" or g_name == self.target_name)):
                                   self.after(0, lambda s=sender: self.show_typing_label(s))
 
                 elif cmd == "GROUP_NOTIFY":
@@ -1036,22 +1143,38 @@ class ChatAppClient(ctk.CTkFrame):
                         self.after(0, lambda h=history: self.render_history(h))
                     except Exception as e:
                         print(f"Error parsing history: {e}")
-                    
-                    if res_type == "PASS":
-                        if status == "True": messagebox.showinfo("Thành công", msg_content)
-                        else: messagebox.showerror("Lỗi", msg_content)
-                    
-                    elif res_type == "INFO":
-                        if status == "True": messagebox.showinfo("Thành công", msg_content)
-                        else: messagebox.showerror("Lỗi", msg_content)
 
-                    elif res_type == "AVATAR":
-                        if status == "True":
-                            messagebox.showinfo("Thành công", "Đổi Avatar thành công")
-                            # msg_content is file_path, theoretically clear cache or update UI if needed.
-                        else: messagebox.showerror("Lỗi", msg_content)
+                elif cmd == "MSG_SENT":
+                    # MSG_SENT|receiver
+                    if len(parts) >= 2:
+                        receiver = parts[1]
+                        # Update first "..." to "✔"
+                        labels = self.msg_status_queues.get(receiver, [])
+                        for lbl in labels:
+                            try:
+                                if lbl.cget("text") == "...":
+                                    self.after(0, lambda l=lbl: l.configure(text="✔"))
+                                    break
+                            except: pass
 
-            except: break
+                elif cmd == "MSG_DELIVERED":
+                    # MSG_DELIVERED|receiver
+                    if len(parts) >= 2:
+                        receiver = parts[1]
+                        # Update first "✔" or "..." to "✔✔"
+                        labels = self.msg_status_queues.get(receiver, [])
+                        for lbl in labels:
+                            try:
+                                txt = lbl.cget("text")
+                                if txt == "..." or txt == "✔":
+                                    self.after(0, lambda l=lbl: l.configure(text="✔✔"))
+                                    break
+                            except: pass
+
+            except Exception as e:
+                print(f"[RECV ERROR] {e}")
+                self.handle_disconnect()
+                break
     
     def open_image_viewer(self, pil_image, filename):
         """Mở cửa sổ xem ảnh phóng to với chức năng Zoom"""
@@ -1146,6 +1269,19 @@ class ChatAppClient(ctk.CTkFrame):
         try:
             self.msg_area._parent_canvas.yview_moveto(1.0)
         except: pass
+
+    def heartbeat_loop(self):
+        """Gửi PING định kỳ"""
+        import time
+        while self.is_running:
+            if self.client_socket:
+                try:
+                    self.client_socket.sendall(Protocol.pack("PING"))
+                except:
+                    print("[HEARTBEAT] Ping failed!")
+                    self.handle_disconnect()
+                    break
+            time.sleep(30) # 30s
 
 # if __name__ == "__main__":
 #     # Standalone testing not supported without MainApp

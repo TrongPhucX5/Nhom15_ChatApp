@@ -191,306 +191,252 @@ class AsyncChatServer:
                     writer.write(Protocol.pack(f"GROUPS|{','.join(user_groups)}"))
                     await writer.drain()
 
-            # Vòng lặp Chat chính
+            # Vòng lặp Chat chính (Refactored)
             while True:
                 msg = await Protocol.recv_msg(reader)
                 if not msg: break
                 
-                # --- XỬ LÝ LỆNH ---
-                if msg.startswith("MSG|"):
-                     # Format: MSG|receiver|content  (Original was MSG|content, need to support both or migrate)
-                     # Old format: MSG|content (Broadcast to all?) -> Not good.
-                     # CURRENT CLIENT sends: MSG|content (Line 629 of chat_window.py)
-                     # WAIT: If client sends MSG|content, receiver is Unknown?
-                     # No, previous logic was Broadcast All.
-                     # Let's support: MSG|content (Broadcast All - Deprecated but support)
-                     # OR: MSG|receiver|content
-                     parts = msg.split("|")
-                     if len(parts) == 2:
-                         # broadcast layout
-                         content = parts[1]
-                         receiver = "General" # Treat broadcast as General room
-                     else:
-                         receiver, content = parts[1], parts[2]
-
-                     print(f"💬 [{username} -> {receiver}]: {content}")
-                     
-                     if self.db: 
-                        loop = asyncio.get_running_loop()
-                        await loop.run_in_executor(None, self.db.save_message, username, receiver, content, "text", None)
-                     
-                     # Check if receiver is "General" -> Broadcast (exclude sender)
-                     if receiver == "General":
-                         response = f"MSG|{username}|{content}"
-                         await self.broadcast(response, exclude_writer=writer)
-                     else:
-                         # Private Message
-                         # Find receiver writer
-                         found = False
-                         for w, u in self.clients.items():
-                             if u == receiver:
-                                 # Send to receiver: MSG|sender|content
-                                 w.write(Protocol.pack(f"MSG|{username}|{content}"))
-                                 await w.drain()
-                                 found = True
-                                 break
-                         # Also echo back to sender so they know it sent? 
-                         # Actually Client handles "Add bubble" immediately.
-                         
-
-                elif msg.startswith("GROUP_CREATE|"):
-                    # GROUP_CREATE|group_name
-                    g_name = msg.split("|")[1]
-                    if self.db:
-                        loop = asyncio.get_running_loop()
-                        success, res = await loop.run_in_executor(None, self.db.create_group, g_name, username)
-                        if success:
-                            writer.write(Protocol.pack(f"GROUP_OK|{g_name}"))
-                            # Gửi lại list group cập nhật
-                            user_groups = await loop.run_in_executor(None, self.db.get_user_groups, username)
-                            writer.write(Protocol.pack(f"GROUPS|{','.join(user_groups)}"))
-                        else:
-                            writer.write(Protocol.pack(f"ERR|{res}"))
-                        await writer.drain()
-
-                elif msg.startswith("GROUP_MSG|"):
-                    # GROUP_MSG|group_name|content
-                    parts = msg.split("|")
-                    if len(parts) >= 3:
-                        g_name = parts[1]
-                        content = parts[2]
-                        print(f"🛡️ [{username} -> {g_name}]: {content}")
-                        
-                        # Save to DB
-                        if self.db:
-                            loop = asyncio.get_running_loop()
-                            await loop.run_in_executor(None, self.db.save_message, username, g_name, content, "text", None)
-
-                        # Broadcast group
-                        await self.broadcast_group(g_name, f"GROUP_MSG|{g_name}|{username}|{content}", exclude_writer=writer)
-
-                elif msg.startswith("GROUP_JOIN|"):
-                     # GROUP_JOIN|group_name
-                    g_name = msg.split("|")[1]
-                    if self.db:
-                        loop = asyncio.get_running_loop()
-                        success, res = await loop.run_in_executor(None, self.db.add_group_member, g_name, username)
-                        if success:
-                            writer.write(Protocol.pack(f"GROUP_OK|{g_name}"))
-                            # Broadcast Notify
-                            await self.broadcast_group(g_name, f"GROUP_NOTIFY|{g_name}|{username} đã tham gia.", exclude_writer=writer)
-                            
-                            # Update group list
-                            user_groups = await loop.run_in_executor(None, self.db.get_user_groups, username)
-                            writer.write(Protocol.pack(f"GROUPS|{','.join(user_groups)}"))
-                        else:
-                            writer.write(Protocol.pack(f"ERR|{res}"))
-                        await writer.drain()
-
-                elif msg.startswith("GROUP_LEAVE|"):
-                    g_name = msg.split("|")[1]
-                    if self.db:
-                        loop = asyncio.get_running_loop()
-                        success, res = await loop.run_in_executor(None, self.db.remove_group_member, g_name, username)
-                        if success:
-                            writer.write(Protocol.pack(f"GROUP_LEFT|{g_name}"))
-                            # Message System: Notify
-                            await self.broadcast_group(g_name, f"GROUP_NOTIFY|{g_name}|{username} đã rời nhóm.", exclude_writer=writer)
-                            
-                            user_groups = await loop.run_in_executor(None, self.db.get_user_groups, username)
-                            writer.write(Protocol.pack(f"GROUPS|{','.join(user_groups)}"))
-                        else:
-                            writer.write(Protocol.pack(f"ERR|{res}"))
-                        await writer.drain()
-
-                elif msg.startswith("GROUP_DELETE|"):
-                    g_name = msg.split("|")[1]
-                    if self.db:
-                        loop = asyncio.get_running_loop()
-                        members = await loop.run_in_executor(None, self.db.get_group_members, g_name)
-                        success, res = await loop.run_in_executor(None, self.db.delete_group, g_name, username)
-                        if success:
-                            encoded_del = Protocol.pack(f"GROUP_DELETED|{g_name}")
-                            for w, u in self.clients.items():
-                                if u in members:
-                                    try:
-                                        w.write(encoded_del)
-                                        # Refresh list
-                                        groups = await loop.run_in_executor(None, self.db.get_user_groups, u)
-                                        w.write(Protocol.pack(f"GROUPS|{','.join(groups)}"))
-                                        await w.drain()
-                                    except: pass
-                        else:
-                            writer.write(Protocol.pack(f"ERR|{res}"))
-                        await writer.drain()
-
-                        await writer.drain()
-
-                # --- HISTORY COMMAND ---
-                elif msg.startswith("CMD_HISTORY|"):
-                    # CMD_HISTORY|target
-                    target = msg.split("|")[1]
-                    if self.db:
-                        loop = asyncio.get_running_loop()
-                        
-                        # Check if target is group
-                        # Simple heuristic: Check if target is in user's groups or if it's a known user
-                        # But simpler: Client knows contexts (Group/Private).
-                        # Let's assume target is the name.
-                        # If target exists in Groups table -> Group History
-                        # Else -> Private History (target is other user)
-                        
-                        # Wait, "General" is a special case?
-                        # If target == "General" -> get messages with receiver='General'
-                        
-                        # We need a proper way to distinguish.
-                        # Protocol update: CMD_HISTORY|mode|target
-                        # Let's try to parse len(parts)
-                        parts = msg.split("|")
-                        mode = "PRIVATE"
-                        if len(parts) >= 3:
-                             mode = parts[2] # PRIVATE or GROUP
-                        else:
-                             # Legacy/compat attempt if client sends old format (unlikely here)
-                             pass 
-                        
-                        history = []
-                        if mode == "GROUP" or target == "General":
-                             history = await loop.run_in_executor(None, self.db.get_group_history, target)
-                        else:
-                             history = await loop.run_in_executor(None, self.db.get_history, username, target)
-                        
-                        # Build JSON or pipe-delimited list
-                        # Let's use JSON for complexity? Or simple list.
-                        # HISTORY_DATA|json_string
-                        # JSON structure: [{"sender": s, "content": c, "timestamp": t, "type": type, "file": f}, ...]
-                        import json
-                        hist_data = []
-                        for row in history:
-                            # row: sender, content, timestamp, msg_type, file_path
-                            hist_data.append({
-                                "sender": row[0], 
-                                "content": row[1], 
-                                "timestamp": row[2], 
-                                "type": row[3], 
-                                "file": row[4]
-                            })
-                        
-                        json_str = json.dumps(hist_data)
-                        # Pack might fail if too long? 
-                        # We send normally.
-                        
-                        # Send in chunks if needed? For now send all.
-                        writer.write(Protocol.pack(f"HISTORY_DATA|{target}|{json_str}"))
-                        await writer.drain()
-
-                # --- USER MANAGEMENT ---
-                elif msg.startswith("CMD_PASS_CHANGE|"):
-                    parts = msg.split("|")
-                    if len(parts) >= 3:
-                        old_p, new_p = parts[1], parts[2]
-                        if self.db and writer in self.client_emails:
-                            loop = asyncio.get_running_loop()
-                            res, msg_res = await loop.run_in_executor(None, self.db.update_password, self.client_emails[writer], old_p, new_p)
-                            writer.write(Protocol.pack(f"CMD_RES|PASS|{str(res)}|{msg_res}"))
-                            await writer.drain()
-
-                elif msg.startswith("CMD_UPDATE_INFO|"):
-                    parts = msg.split("|")
-                    if len(parts) >= 3:
-                        new_name, new_email = parts[1], parts[2]
-                        if self.db and writer in self.client_emails:
-                            current_email = self.client_emails[writer]
-                            loop = asyncio.get_running_loop()
-                            res, msg_res = await loop.run_in_executor(None, self.db.update_info, current_email, new_name, new_email)
-                            if res:
-                                # Update in-memory session if email changed
-                                self.client_emails[writer] = new_email
-                                self.clients[writer] = new_name
-                                # TODO: Broadcast name change?
-                            writer.write(Protocol.pack(f"CMD_RES|INFO|{str(res)}|{msg_res}"))
-                            await writer.drain()
-
-                elif msg.startswith("CMD_UPDATE_AVATAR|"):
-                    parts = msg.split("|")
-                    if len(parts) >= 3:
-                        filename, b64_data = parts[1], parts[2]
-                        if self.db and writer in self.client_emails:
-                             # Save file
-                             if not os.path.exists("uploads/avatars"):
-                                 os.makedirs("uploads/avatars")
-                             
-                             fname_secure = f"{self.client_emails[writer]}_{datetime.datetime.now().strftime('%M%S')}_{filename}"
-                             file_path = f"uploads/avatars/{fname_secure}"
-                             
-                             try:
-                                 with open(file_path, "wb") as f:
-                                     f.write(base64.b64decode(b64_data))
-                                 
-                                 loop = asyncio.get_running_loop()
-                                 res, msg_res = await loop.run_in_executor(None, self.db.update_avatar, self.client_emails[writer], file_path)
-                                 writer.write(Protocol.pack(f"CMD_RES|AVATAR|{str(res)}|{file_path}"))
-                             except Exception as e:
-                                 writer.write(Protocol.pack(f"CMD_RES|AVATAR|False|{str(e)}"))
-                             await writer.drain()
-                
-                elif msg.startswith("CMD_TYPING|"):
-                    # CMD_TYPING|target|sender
-                    parts = msg.split("|")
-                    if len(parts) >= 3:
-                        target, sender = parts[1], parts[2]
-                        # Broadcast TYPING|target|sender to appropriate people
-                        if target == "General":
-                             # Broadcast to all except sender
-                             await self.broadcast(f"TYPING|{target}|{sender}", exclude_writer=writer)
-                        else:
-                             # Broadcast to Group
-                             await self.broadcast_group(target, f"TYPING|{target}|{sender}", exclude_writer=writer)
-                             
-                elif msg.startswith("CMD_GET_INFO"):
-                    if self.db and writer in self.client_emails:
-                        loop = asyncio.get_running_loop()
-                        info = await loop.run_in_executor(None, self.db.get_user_info, self.client_emails[writer])
-                        if info:
-                            # INFO|name|email|avatar
-                            avt = info['avatar'] if info['avatar'] else ""
-                            writer.write(Protocol.pack(f"CMD_RES|GET_INFO|{info['username']}|{info['email']}|{avt}"))
-                        else:
-                            writer.write(Protocol.pack("CMD_RES|GET_INFO|Error|Error|"))
-                        await writer.drain()
-
-                elif msg.startswith("FILE|"):
-                    # FILE|filename|base64_string
-                    parts = msg.split("|")
-                    if len(parts) >= 3:
-                        filename = parts[1]
-                        b64_data = parts[2]
-                        
-                        # Tạo thư mục uploads nếu chưa có
-                        if not os.path.exists("uploads"):
-                            os.makedirs("uploads")
-                        
-                        file_path = f"uploads/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
-                        
-                        # Sử dụng run_in_executor để lưu file không chặn main loop
-                        loop = asyncio.get_running_loop()
-                        success, error = await loop.run_in_executor(None, self.save_file_to_disk, file_path, b64_data)
-
-                        if success:
-                            print(f"📁 [{username}] Gửi file: {filename}")
-                            if self.db:
-                                await loop.run_in_executor(None, self.db.save_message, username, filename, "file", file_path)
-
-                            # Broadcast: FILE|username|filename|b64_data
-                            response = f"FILE|{username}|{filename}|{b64_data}"
-                            await self.broadcast(response, exclude_writer=writer)
-                        else:
-                            print(f"[ERR] Save File Failed: {error}")
-
+                await self._process_command(msg, writer, username)
         except Exception as e:
             print(f" [ERR] Lỗi xử lý client {username}: {e}")
         finally:
             self.remove_client(writer)
+
+    # --- REFACTORED COMMAND HANDLERS ---
+    async def _process_command(self, msg, writer, username):
+        """Dispatch lệnh tới các hàm xử lý tương ứng"""
+        parts = msg.split("|")
+        cmd = parts[0]
+
+        if cmd == "MSG":
+            await self._handle_msg(writer, username, parts)
+        elif cmd.startswith("GROUP_"):
+            await self._handle_group(writer, username, cmd, parts)
+        elif cmd == "CMD_HISTORY":
+            await self._handle_history(writer, username, parts)
+        elif cmd == "PING":
+            # Heartbeat
+            # print(f" [HEARTBEAT] PING from {username}") 
+            writer.write(Protocol.pack("PONG"))
+            await writer.drain()
+        elif cmd.startswith("CMD_"):
+             # User mgmt, typing, etc.
+             await self._handle_other_cmds(writer, username, cmd, parts)
+        elif cmd == "FILE":
+             await self._handle_file(writer, username, parts)
+        else:
+             print(f" [WARN] Unknown command from {username}: {msg}")
+
+    async def _handle_msg(self, writer, username, parts):
+        # MSG|receiver|content
+        if len(parts) == 2:
+            content = parts[1]
+            receiver = "General"
+        else:
+             receiver, content = parts[1], parts[2]
+
+        print(f"💬 [{username} -> {receiver}]: {content}")
+        
+        if self.db: 
+           loop = asyncio.get_running_loop()
+           await loop.run_in_executor(None, self.db.save_message, username, receiver, content, "text", None)
+        
+        # Ack to sender (Sent)
+        try:
+            writer.write(Protocol.pack(f"MSG_SENT|{receiver}"))
+            await writer.drain()
+        except: pass
+
+        if receiver == "General":
+            response = f"MSG|{username}|{content}"
+            await self.broadcast(response, exclude_writer=writer)
+        else:
+            # Private
+            found = False
+            for w, u in self.clients.items():
+                if u == receiver:
+                    w.write(Protocol.pack(f"MSG|{username}|{content}"))
+                    await w.drain()
+                    found = True
+                    # Notify sender (Delivered)
+                    try:
+                        writer.write(Protocol.pack(f"MSG_DELIVERED|{receiver}"))
+                        await writer.drain()
+                    except: pass
+                    break
+
+    async def _handle_group(self, writer, username, cmd, parts):
+        if cmd == "GROUP_CREATE":
+            g_name = parts[1]
+            if self.db:
+                loop = asyncio.get_running_loop()
+                success, res = await loop.run_in_executor(None, self.db.create_group, g_name, username)
+                if success:
+                    writer.write(Protocol.pack(f"GROUP_OK|{g_name}"))
+                    user_groups = await loop.run_in_executor(None, self.db.get_user_groups, username)
+                    writer.write(Protocol.pack(f"GROUPS|{','.join(user_groups)}"))
+                else:
+                    writer.write(Protocol.pack(f"ERR|{res}"))
+                await writer.drain()
+
+        elif cmd == "GROUP_MSG":
+            if len(parts) >= 3:
+                g_name, content = parts[1], parts[2]
+                print(f"🛡️ [{username} -> {g_name}]: {content}")
+                if self.db:
+                    loop = asyncio.get_running_loop()
+                    await loop.run_in_executor(None, self.db.save_message, username, g_name, content, "text", None)
+                await self.broadcast_group(g_name, f"GROUP_MSG|{g_name}|{username}|{content}", exclude_writer=writer)
+
+        elif cmd == "GROUP_JOIN":
+            g_name = parts[1]
+            if self.db:
+                loop = asyncio.get_running_loop()
+                success, res = await loop.run_in_executor(None, self.db.add_group_member, g_name, username)
+                if success:
+                    writer.write(Protocol.pack(f"GROUP_OK|{g_name}"))
+                    await self.broadcast_group(g_name, f"GROUP_NOTIFY|{g_name}|{username} đã tham gia.", exclude_writer=writer)
+                    user_groups = await loop.run_in_executor(None, self.db.get_user_groups, username)
+                    writer.write(Protocol.pack(f"GROUPS|{','.join(user_groups)}"))
+                else:
+                    writer.write(Protocol.pack(f"ERR|{res}"))
+                await writer.drain()
+
+        elif cmd == "GROUP_LEAVE":
+            g_name = parts[1]
+            if self.db:
+                loop = asyncio.get_running_loop()
+                success, res = await loop.run_in_executor(None, self.db.remove_group_member, g_name, username)
+                if success:
+                    writer.write(Protocol.pack(f"GROUP_LEFT|{g_name}"))
+                    await self.broadcast_group(g_name, f"GROUP_NOTIFY|{g_name}|{username} đã rời nhóm.", exclude_writer=writer)
+                    user_groups = await loop.run_in_executor(None, self.db.get_user_groups, username)
+                    writer.write(Protocol.pack(f"GROUPS|{','.join(user_groups)}"))
+                else:
+                    writer.write(Protocol.pack(f"ERR|{res}"))
+                await writer.drain()
+        
+        elif cmd == "GROUP_DELETE":
+            g_name = parts[1]
+            if self.db:
+                loop = asyncio.get_running_loop()
+                members = await loop.run_in_executor(None, self.db.get_group_members, g_name)
+                success, res = await loop.run_in_executor(None, self.db.delete_group, g_name, username)
+                if success:
+                    encoded_del = Protocol.pack(f"GROUP_DELETED|{g_name}")
+                    for w, u in self.clients.items():
+                        if u in members:
+                            try:
+                                w.write(encoded_del)
+                                groups = await loop.run_in_executor(None, self.db.get_user_groups, u)
+                                w.write(Protocol.pack(f"GROUPS|{','.join(groups)}"))
+                                await w.drain()
+                            except: pass
+                else:
+                    writer.write(Protocol.pack(f"ERR|{res}"))
+                await writer.drain()
+
+    async def _handle_history(self, writer, username, parts):
+        target = parts[1]
+        mode = "PRIVATE"
+        if len(parts) >= 3:
+             mode = parts[2]
+        
+        loop = asyncio.get_running_loop()
+        history = []
+        if self.db:
+            if mode == "GROUP" or target == "General":
+                 history = await loop.run_in_executor(None, self.db.get_group_history, target)
+            else:
+                 history = await loop.run_in_executor(None, self.db.get_history, username, target)
+        
+        import json
+        hist_data = []
+        for row in history:
+            hist_data.append({
+                "sender": row[0], "content": row[1], "timestamp": row[2], "type": row[3], "file": row[4]
+            })
+        json_str = json.dumps(hist_data)
+        writer.write(Protocol.pack(f"HISTORY_DATA|{target}|{json_str}"))
+        await writer.drain()
+
+    async def _handle_other_cmds(self, writer, username, cmd, parts):
+        loop = asyncio.get_running_loop()
+        if cmd == "CMD_PASS_CHANGE" and len(parts) >= 3:
+             old_p, new_p = parts[1], parts[2]
+             if self.db:
+                 res, msg_res = await loop.run_in_executor(None, self.db.update_password, self.client_emails[writer], old_p, new_p)
+                 writer.write(Protocol.pack(f"CMD_RES|PASS|{str(res)}|{msg_res}"))
+                 await writer.drain()
+
+        elif cmd == "CMD_UPDATE_INFO" and len(parts) >= 3:
+             new_name, new_email = parts[1], parts[2]
+             if self.db:
+                 res, msg_res = await loop.run_in_executor(None, self.db.update_info, self.client_emails[writer], new_name, new_email)
+                 if res:
+                     self.client_emails[writer] = new_email
+                     self.clients[writer] = new_name
+                 writer.write(Protocol.pack(f"CMD_RES|INFO|{str(res)}|{msg_res}"))
+                 await writer.drain()
+
+        elif cmd == "CMD_UPDATE_AVATAR" and len(parts) >= 3:
+             filename, b64_data = parts[1], parts[2]
+             if self.db:
+                 if not os.path.exists("uploads/avatars"): os.makedirs("uploads/avatars")
+                 fname_secure = f"{self.client_emails[writer]}_{datetime.datetime.now().strftime('%M%S')}_{filename}"
+                 file_path = f"uploads/avatars/{fname_secure}"
+                 try:
+                     with open(file_path, "wb") as f: f.write(base64.b64decode(b64_data))
+                     res, msg_res = await loop.run_in_executor(None, self.db.update_avatar, self.client_emails[writer], file_path)
+                     writer.write(Protocol.pack(f"CMD_RES|AVATAR|{str(res)}|{file_path}"))
+                 except Exception as e:
+                     writer.write(Protocol.pack(f"CMD_RES|AVATAR|False|{str(e)}"))
+                 await writer.drain()
+
+        elif cmd == "CMD_TYPING" and len(parts) >= 3:
+             target, sender = parts[1], parts[2]
+             if target == "General":
+                  await self.broadcast(f"TYPING|{target}|{sender}", exclude_writer=writer)
+             else:
+                  # Private Typing
+                  found_user = False
+                  for w, u in self.clients.items():
+                      if u == target:
+                          try:
+                              w.write(Protocol.pack(f"TYPING|{sender}|{sender}"))
+                              await w.drain()
+                              found_user = True
+                          except: pass
+                          break
+                  if not found_user:
+                      await self.broadcast_group(target, f"TYPING|{target}|{sender}", exclude_writer=writer)
+        
+        elif cmd == "CMD_GET_INFO":
+            if self.db and writer in self.client_emails:
+                loop = asyncio.get_running_loop()
+                info = await loop.run_in_executor(None, self.db.get_user_info, self.client_emails[writer])
+                if info:
+                    avt = info['avatar'] if info['avatar'] else ""
+                    writer.write(Protocol.pack(f"CMD_RES|GET_INFO|{info['username']}|{info['email']}|{avt}"))
+                else:
+                    writer.write(Protocol.pack("CMD_RES|GET_INFO|Error|Error|"))
+                await writer.drain()
+
+    async def _handle_file(self, writer, username, parts):
+        if len(parts) >= 3:
+            filename, b64_data = parts[1], parts[2]
+            if not os.path.exists("uploads"): os.makedirs("uploads")
+            file_path = f"uploads/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
+            loop = asyncio.get_running_loop()
+            success, error = await loop.run_in_executor(None, self.save_file_to_disk, file_path, b64_data)
+            if success:
+                print(f"📁 [{username}] Gửi file: {filename}")
+                if self.db:
+                     await loop.run_in_executor(None, self.db.save_message, username, filename, "file", file_path)
+                response = f"FILE|{username}|{filename}|{b64_data}"
+                await self.broadcast(response, exclude_writer=writer)
+            else:
+                print(f"[ERR] Save File Failed: {error}")
 
     async def start(self):
         server = await asyncio.start_server(self.handle_client, HOST, PORT)

@@ -25,9 +25,9 @@ except ImportError:
 ZALO_BLUE = "#0084FF" # Messenger Blue
 ZALO_BG_LIGHT = "#F0F2F5"
 ZALO_BUBBLE_ME = "#0084FF" # Blue for me
-ZALO_BUBBLE_YOU = "#E4E6EB" # Gray for others
+ZALO_BUBBLE_YOU = "#3a3b3c" # Gray for others
 TEXT_COLOR_ME = "white"
-TEXT_COLOR_YOU = "black"
+TEXT_COLOR_YOU = "white"
 
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
@@ -115,6 +115,8 @@ class ChatAppClient(ctk.CTkFrame):
         self.build_nav_bar()
         self.build_sidebar()
         self.build_main_chat()
+        self.build_settings_view() # Thêm view cài đặt tích hợp
+        self.build_profile_view() # Thêm view profile tích hợp
         
         if self.connect_state == "RECONNECTING":
             # Nếu chưa connect được, báo UI đang đợi
@@ -218,13 +220,14 @@ class ChatAppClient(ctk.CTkFrame):
     # 1. NAV BAR (CỘT TRÁI CÙNG)
     # =========================================================================
     def build_nav_bar(self):
-        self.nav_frame = ctk.CTkFrame(self, width=70, corner_radius=0, fg_color=ZALO_BLUE)
+        # Đổi fg_color thành adaptive color (Light, Dark)
+        self.nav_frame = ctk.CTkFrame(self, width=70, corner_radius=0, fg_color=("#0084FF", "#262626"))
         self.nav_frame.grid(row=0, column=0, sticky="nsew")
         self.nav_frame.grid_propagate(False)
 
         # Avatar
         btn_avatar = ctk.CTkButton(self.nav_frame, text=self.username[0].upper(), width=45, height=45, corner_radius=22,
-                      fg_color="#1a8cff", hover_color="white", text_color="white", font=("Arial", 18, "bold"),
+                      fg_color=("#1a8cff", "#3a3b3c"), hover_color=("white", "#4e4f50"), text_color="white", font=("Arial", 18, "bold"),
                       command=self.open_profile_modal)
         btn_avatar.pack(pady=(30, 20))
         ToolTip(btn_avatar, "Hồ sơ của bạn")
@@ -236,15 +239,16 @@ class ChatAppClient(ctk.CTkFrame):
         
         # Settings
         btn_settings = ctk.CTkButton(self.nav_frame, text="⚙️", width=40, height=40, fg_color="transparent",
-                      hover_color="#1a8cff", font=("Segoe UI Emoji", 22),
+                      hover_color=("#1a8cff", "#3a3b3c"), font=("Segoe UI Emoji", 22),
                       command=self.open_settings_modal)
         btn_settings.pack(side="bottom", pady=20)
         ToolTip(btn_settings, "Cài đặt")
 
     def create_nav_btn(self, icon, is_active, command, tooltip=""):
-        color = "#1a8cff" if is_active else "transparent"
+        active_color = ("#1a8cff", "#3a3b3c")
+        color = active_color if is_active else "transparent"
         btn = ctk.CTkButton(self.nav_frame, text=icon, width=45, height=45, corner_radius=12,
-                            fg_color=color, hover_color="#1a8cff", font=("Segoe UI Emoji", 22),
+                            fg_color=color, hover_color=active_color, font=("Segoe UI Emoji", 22),
                             command=command)
         btn.pack(pady=8)
         if tooltip: ToolTip(btn, tooltip)
@@ -284,7 +288,7 @@ class ChatAppClient(ctk.CTkFrame):
         header_side = ctk.CTkFrame(self.side_frame, height=60, fg_color="transparent")
         header_side.grid(row=0, column=0, sticky="ew")
         
-        self.lbl_sidebar_title = ctk.CTkLabel(header_side, text="Tìm kiếm", font=("Segoe UI", 14, "bold"), text_color="gray")
+        self.lbl_sidebar_title = ctk.CTkLabel(header_side, text="Tìm kiếm", font=("Segoe UI", 14, "bold"), text_color=("gray", "lightgray"))
         self.lbl_sidebar_title.pack(side="left", padx=15, pady=15)
         
         btn_add = ctk.CTkButton(header_side, text="➕", width=30, height=30, fg_color="transparent", text_color=("black", "white"), 
@@ -408,6 +412,86 @@ class ChatAppClient(ctk.CTkFrame):
         # Init State
         validate_input()
 
+    def build_settings_view(self):
+        """Xây dựng khung cài đặt tích hợp trong cửa sổ chính"""
+        self.settings_view = ctk.CTkFrame(self, corner_radius=0, fg_color=("white", "#1e1e1e"))
+        # Không grid ngay, để ẩn lúc đầu
+        
+        # Header của Settings
+        settings_header = ctk.CTkFrame(self.settings_view, height=68, corner_radius=0, fg_color=("white", "#2b2b2b"))
+        settings_header.pack(side="top", fill="x")
+        
+        btn_back = ctk.CTkButton(settings_header, text="⬅ Quay lại", width=100, height=35, fg_color=ZALO_BLUE, 
+                                 text_color="white", command=self.close_settings_view)
+        btn_back.pack(side="left", padx=20, pady=15)
+        
+        ctk.CTkLabel(settings_header, text="Cài đặt hệ thống", font=("Segoe UI", 18, "bold")).pack(side="left", padx=20)
+
+        # Tabview trong settings
+        tab = ctk.CTkTabview(self.settings_view, width=600, height=500)
+        tab.pack(padx=30, pady=30, fill="both", expand=True)
+        tab.add("Giao diện")
+        tab.add("Bảo mật")
+        tab.add("Hệ thống")
+        
+        # --- TAB GIAO DIỆN ---
+        ctk.CTkLabel(tab.tab("Giao diện"), text="Cấu hình hiển thị", font=("Segoe UI", 16, "bold")).pack(pady=(20, 10))
+        
+        switch_var = ctk.StringVar(value="on" if ctk.get_appearance_mode() == "Dark" else "off")
+        def toggle_mode():
+            mode = "Dark" if switch_var.get() == "on" else "Light"
+            ctk.set_appearance_mode(mode)
+            # Cập nhật lại màu các icon/viền nếu cần thiết
+            
+        ctk.CTkSwitch(tab.tab("Giao diện"), text="Chế độ Tối (Dark Mode)", 
+                      variable=switch_var, onvalue="on", offvalue="off", command=toggle_mode).pack(pady=20)
+                      
+        # --- TAB BẢO MẬT ---
+        ctk.CTkLabel(tab.tab("Bảo mật"), text="Thay đổi mật khẩu", font=("Segoe UI", 16, "bold")).pack(pady=10)
+        
+        form = ctk.CTkFrame(tab.tab("Bảo mật"), fg_color="transparent")
+        form.pack(pady=20)
+        
+        txt_old_pass = ctk.CTkEntry(form, placeholder_text="Mật khẩu cũ", show="*", width=300, height=40)
+        txt_old_pass.pack(pady=10)
+        
+        txt_new_pass = ctk.CTkEntry(form, placeholder_text="Mật khẩu mới", show="*", width=300, height=40)
+        txt_new_pass.pack(pady=10)
+        
+        def save_pass_action():
+            old = txt_old_pass.get()
+            new = txt_new_pass.get()
+            if not old or not new:
+                messagebox.showerror("Lỗi", "Vui lòng nhập đầy đủ")
+                return
+            try:
+                self.client_socket.sendall(Protocol.pack(f"CMD_PASS_CHANGE|{old}|{new}"))
+                messagebox.showinfo("Thông báo", "Đã gửi yêu cầu đổi mật khẩu")
+                txt_old_pass.delete(0, 'end')
+                txt_new_pass.delete(0, 'end')
+            except Exception as e:
+                messagebox.showerror("Lỗi", str(e))
+                
+        ctk.CTkButton(tab.tab("Bảo mật"), text="Lưu thay đổi", command=save_pass_action, width=200, height=40).pack(pady=20)
+        
+        # --- TAB HỆ THỐNG ---
+        ctk.CTkLabel(tab.tab("Hệ thống"), text="Thông tin tài khoản", font=("Segoe UI", 16, "bold")).pack(pady=20)
+        ctk.CTkLabel(tab.tab("Hệ thống"), text=f"Người dùng: {self.username}", font=("Segoe UI", 14)).pack(pady=10)
+        ctk.CTkLabel(tab.tab("Hệ thống"), text=f"Email ID: {self.email or 'Chưa cập nhật'}", font=("Segoe UI", 14)).pack(pady=10)
+        
+        ctk.CTkButton(tab.tab("Hệ thống"), text="Đăng xuất khỏi thiết bị", fg_color="#ff4d4d", hover_color="#cc0000", 
+                      command=self.on_close, width=200, height=40).pack(pady=40)
+
+    def open_settings_modal(self):
+        """Thay thế việc mở cửa sổ mới bằng cách hiển thị frame cài đặt tích hợp"""
+        self.main_frame.grid_remove() # Ẩn màn hình chat
+        self.settings_view.grid(row=0, column=2, sticky="nsew") # Hiện màn hình settings ở cùng vị trí
+
+    def close_settings_view(self):
+        """Quay lại màn hình chat"""
+        self.settings_view.grid_remove()
+        self.main_frame.grid()
+
     def create_tool_btn(self, parent, icon, cmd, tooltip=""):
         btn = ctk.CTkButton(parent, text=icon, width=40, height=35, fg_color="transparent", 
                       text_color="#555", hover_color="#f0f0f0", font=("Segoe UI Emoji", 18), 
@@ -420,82 +504,29 @@ class ChatAppClient(ctk.CTkFrame):
     # 4. CÁC HÀM XỬ LÝ SỰ KIỆN (INTERACTIONS)
     # =========================================================================
     
-    # --- Chức năng Cài đặt (Fix lỗi cũ) ---
-    # --- Chức năng Cài đặt (Fix lỗi cũ) ---
-    def open_settings_modal(self):
-        # 1. Check if window already exists
-        if hasattr(self, 'settings_win') and self.settings_win is not None and self.settings_win.winfo_exists():
-            self.settings_win.focus() # Focus instead of recreate
-            self.settings_win.lift()  # Bring to top
-            return
-
-        # 2. Create new window
-        win = ctk.CTkToplevel(self)
-        self.settings_win = win # Save reference
-        win.title("Cài đặt")
-        win.geometry("500x500")
-        win.attributes("-topmost", True)
-        
-        # 3. Cleanup on close
-        def on_close_settings():
-            self.settings_win = None
-            win.destroy()
-        win.protocol("WM_DELETE_WINDOW", on_close_settings)
-        
-        tab = ctk.CTkTabview(win, width=460, height=450)
-        tab.pack(padx=10, pady=10)
-        tab.add("Giao diện")
-        tab.add("Bảo mật")
-        
-        # --- TAB GIAO DIỆN ---
-        switch_var = ctk.StringVar(value="off")
-        def toggle_mode():
-            mode = "Dark" if switch_var.get() == "on" else "Light"
-            ctk.set_appearance_mode(mode)
-            
-        ctk.CTkSwitch(tab.tab("Giao diện"), text="Chế độ Tối (Dark Mode)", 
-                      variable=switch_var, onvalue="on", offvalue="off", command=toggle_mode).pack(pady=20)
-                      
-        # --- TAB BẢO MẬT (Đổi mật khẩu) ---
-        ctk.CTkLabel(tab.tab("Bảo mật"), text="Đổi mật khẩu", font=("Segoe UI", 16, "bold")).pack(pady=10)
-        
-        txt_old_pass = ctk.CTkEntry(tab.tab("Bảo mật"), placeholder_text="Mật khẩu cũ", show="*")
-        txt_old_pass.pack(pady=5)
-        
-        txt_new_pass = ctk.CTkEntry(tab.tab("Bảo mật"), placeholder_text="Mật khẩu mới", show="*")
-        txt_new_pass.pack(pady=5)
-        
-        def save_pass_action():
-            old = txt_old_pass.get()
-            new = txt_new_pass.get()
-            if not old or not new:
-                messagebox.showerror("Lỗi", "Vui lòng nhập đầy đủ")
-                return
-            try:
-                self.client_socket.sendall(Protocol.pack(f"CMD_PASS_CHANGE|{old}|{new}"))
-                win.destroy()
-                messagebox.showinfo("Thông báo", "Đã gửi yêu cầu đổi mật khẩu")
-            except Exception as e:
-                messagebox.showerror("Lỗi", str(e))
-                
-        ctk.CTkButton(tab.tab("Bảo mật"), text="Lưu thay đổi", command=save_pass_action).pack(pady=20)
-        
-        # --- TAB HỆ THỐNG (Logout) ---
-        tab.add("Hệ thống")
-        ctk.CTkLabel(tab.tab("Hệ thống"), text=f"Tài khoản: {self.username}", font=("Segoe UI", 14)).pack(pady=20)
-        ctk.CTkButton(tab.tab("Hệ thống"), text="Đăng xuất", fg_color="red", hover_color="#cc0000", command=self.on_close).pack(pady=10)
-
     # --- Chức năng Profile ---
-    def open_profile_modal(self):
-        win = ctk.CTkToplevel(self)
-        win.title("Hồ sơ Cá nhân")
-        win.geometry("400x500")
-        win.attributes("-topmost", True)
+    def build_profile_view(self):
+        """Xây dựng khung hồ sơ cá nhân tích hợp"""
+        self.profile_view = ctk.CTkFrame(self, corner_radius=0, fg_color=("white", "#1e1e1e"))
+
+        # Header Profile
+        profile_header = ctk.CTkFrame(self.profile_view, height=68, corner_radius=0, fg_color=("white", "#2b2b2b"))
+        profile_header.pack(side="top", fill="x")
+
+        btn_back = ctk.CTkButton(profile_header, text="⬅ Quay lại", width=100, height=35, fg_color=ZALO_BLUE,
+                                 text_color="white", command=self.close_profile_view)
+        btn_back.pack(side="left", padx=20, pady=15)
+
+        ctk.CTkLabel(profile_header, text="Hồ sơ cá nhân", font=("Segoe UI", 18, "bold")).pack(side="left", padx=20)
+        
+        # Content Scrollable Frame
+        content_frame = ctk.CTkFrame(self.profile_view, fg_color="transparent")
+        content_frame.pack(fill="both", expand=True, padx=40, pady=40)
         
         # Avatar Preview
-        self.lbl_avatar_preview = ctk.CTkButton(win, text=self.username[0].upper(), width=100, height=100, corner_radius=50,
-                      fg_color=ZALO_BLUE, font=("Arial", 40, "bold"), hover=False)
-        self.lbl_avatar_preview.pack(pady=(30, 10))
+        self.lbl_avatar_preview = ctk.CTkButton(content_frame, text=self.username[0].upper(), width=120, height=120, corner_radius=60,
+                      fg_color=ZALO_BLUE, font=("Arial", 50, "bold"), hover=False)
+        self.lbl_avatar_preview.pack(pady=(20, 10))
         
         # Upload Avatar Button
         def upload_avatar_handler():
@@ -512,32 +543,43 @@ class ChatAppClient(ctk.CTkFrame):
                 except Exception as e:
                     messagebox.showerror("Lỗi", str(e))
 
-        ctk.CTkButton(win, text="📷 Đổi Avatar", width=100, fg_color="gray", command=upload_avatar_handler).pack()
+        ctk.CTkButton(content_frame, text="📷 Đổi Avatar", width=120, fg_color="gray", command=upload_avatar_handler).pack(pady=10)
         
         # Edit Info Form
-        ctk.CTkLabel(win, text="Tên hiển thị:", anchor="w").pack(fill="x", padx=40, pady=(20,0))
-        txt_name = ctk.CTkEntry(win)
-        txt_name.pack(fill="x", padx=40, pady=5)
-        txt_name.insert(0, self.username)
+        form_frame = ctk.CTkFrame(content_frame, fg_color="transparent")
+        form_frame.pack(pady=30)
         
-        ctk.CTkLabel(win, text="Email (ID):", anchor="w").pack(fill="x", padx=40, pady=(10,0))
-        txt_email = ctk.CTkEntry(win) # Email changes might require re-login, treating as allowed for now
-        txt_email.pack(fill="x", padx=40, pady=5)
-# Note: Client doesn't locally know email unless we store it. Assuming user knows their email or we fetch it. 
-# For now let's just let them type.
+        ctk.CTkLabel(form_frame, text="Tên hiển thị:", anchor="w", font=("Segoe UI", 14)).pack(fill="x", pady=(10,5))
+        self.txt_profile_name = ctk.CTkEntry(form_frame, width=300, height=40)
+        self.txt_profile_name.pack(fill="x", pady=5)
+        self.txt_profile_name.insert(0, self.username)
+        
+        ctk.CTkLabel(form_frame, text="Email (ID):", anchor="w", font=("Segoe UI", 14)).pack(fill="x", pady=(15,5))
+        self.txt_profile_email = ctk.CTkEntry(form_frame, width=300, height=40) 
+        self.txt_profile_email.pack(fill="x", pady=5)
+        if self.email:
+             self.txt_profile_email.insert(0, self.email)
 
         def save_info():
-            new_name = txt_name.get()
-            new_email = txt_email.get()
+            new_name = self.txt_profile_name.get()
+            new_email = self.txt_profile_email.get()
             if not new_name or not new_email: return
             try:
                 self.client_socket.sendall(Protocol.pack(f"CMD_UPDATE_INFO|{new_name}|{new_email}"))
-                win.destroy()
                 messagebox.showinfo("Thông báo", "Đã gửi yêu cầu cập nhật")
+                # Update local username display if needed immediately, or wait for server confirmation/re-login
             except Exception as e:
                 messagebox.showerror("Lỗi", str(e))
 
-        ctk.CTkButton(win, text="Lưu thông tin", command=save_info).pack(pady=30)
+        ctk.CTkButton(form_frame, text="Lưu thông tin", command=save_info, width=200, height=40, font=("Segoe UI", 14, "bold")).pack(pady=40)
+
+    def open_profile_modal(self):
+        self.main_frame.grid_remove()
+        self.profile_view.grid(row=0, column=2, sticky="nsew")
+
+    def close_profile_view(self):
+        self.profile_view.grid_remove()
+        self.main_frame.grid()
 
     # --- Các chức năng giả lập khác ---
     def show_dummy_contacts(self):
@@ -733,11 +775,11 @@ class ChatAppClient(ctk.CTkFrame):
         
         # 1. GROUPS SECTION
         if self.group_list_data:
-            ctk.CTkLabel(self.user_scroll, text="NHÓM CỦA BẠN", font=("Segoe UI", 11, "bold"), text_color="gray").pack(anchor="w", padx=10, pady=(10,5))
+            ctk.CTkLabel(self.user_scroll, text="NHÓM CỦA BẠN", font=("Segoe UI", 11, "bold"), text_color=("gray", "lightgray")).pack(anchor="w", padx=10, pady=(10,5))
             for g in self.group_list_data:
                 # Active style
                 is_selected = (self.chat_mode == "GROUP" and self.target_name == g)
-                bg_color = "#e5efff" if is_selected else "transparent"
+                bg_color = ("#e5efff", "#3a3b3c") if is_selected else "transparent"
                 
                 frame = ctk.CTkFrame(self.user_scroll, fg_color=bg_color, corner_radius=6)
                 frame.pack(fill="x", pady=2, padx=5)
@@ -750,7 +792,7 @@ class ChatAppClient(ctk.CTkFrame):
                 btn_icon.pack(side="left", padx=10, pady=5)
                 btn_icon.bind("<Button-1>", lambda e, name=g: self.select_chat_target("GROUP", name))
 
-                lbl = ctk.CTkLabel(frame, text=g, font=("Segoe UI", 13, "bold"), text_color="black")
+                lbl = ctk.CTkLabel(frame, text=g, font=("Segoe UI", 13, "bold"), text_color=("black", "white"))
                 lbl.pack(side="left", anchor="w")
                 lbl.bind("<Button-1>", lambda e, name=g: self.select_chat_target("GROUP", name))
 
@@ -761,7 +803,7 @@ class ChatAppClient(ctk.CTkFrame):
                                   fg_color="red", text_color="white", font=("Arial", 10, "bold")).pack(side="right", padx=5)
 
         # 2. ONLINE USERS SECTION
-        ctk.CTkLabel(self.user_scroll, text="TRỰC TUYẾN", font=("Segoe UI", 12, "bold"), text_color="gray").pack(anchor="w", padx=15, pady=(15,8))
+        ctk.CTkLabel(self.user_scroll, text="TRỰC TUYẾN", font=("Segoe UI", 12, "bold"), text_color=("gray", "lightgray")).pack(anchor="w", padx=15, pady=(15,8))
         
         for u in self.user_list_data:
             frame = ctk.CTkFrame(self.user_scroll, fg_color="transparent")
@@ -778,8 +820,8 @@ class ChatAppClient(ctk.CTkFrame):
             inner_frame.pack(fill="x")
             
             # Avatar (Create & Pack First)
-            avatar_color = ZALO_BLUE if u == self.username else "#e6e8eb"
-            avatar_txt = "white" if u == self.username else "#333"
+            avatar_color = ZALO_BLUE if u == self.username else ("#e6e8eb", "#3a3b3c")
+            avatar_txt = "white" if u == self.username else ("#333", "white")
             
             # Determine command based on user
             cmd = self.open_profile_modal if u == self.username else lambda name=u: self.select_chat_target("PRIVATE", name)

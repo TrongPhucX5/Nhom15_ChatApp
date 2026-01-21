@@ -4,6 +4,8 @@ from PIL import Image
 import os
 import sys
 import socket
+import json
+import base64
 
 # Thêm đường dẫn để import
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,6 +30,7 @@ class LoginWindow(ctk.CTkFrame):
         self.on_login_success = on_login_success
         self.sock = None
         self.username = None
+        self.session_file = "session.json"
 
         # --- ĐƯỜNG DẪN ẢNH ---
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -70,7 +73,14 @@ class LoginWindow(ctk.CTkFrame):
         # Password
         ctk.CTkLabel(self.form_frame, text="Mật khẩu", font=("Segoe UI", 11, "bold"), text_color="#333").pack(anchor="w", pady=(0, 5))
         self.entry_pass = ctk.CTkEntry(self.form_frame, placeholder_text="Nhập mật khẩu...", width=300, height=40, corner_radius=20, border_color="#e0e0e0", fg_color="#f9f9f9", text_color="#333", show="●")
-        self.entry_pass.pack(fill="x", pady=(0, 25))
+        self.entry_pass.pack(fill="x", pady=(0, 10))
+
+        # Remember me & Forgot Password
+        options_frame = ctk.CTkFrame(self.form_frame, fg_color="transparent")
+        options_frame.pack(fill="x", pady=(0, 20))
+        self.remember_me_var = ctk.StringVar(value="on")
+        ctk.CTkCheckBox(options_frame, text="Ghi nhớ đăng nhập", variable=self.remember_me_var, onvalue="on", offvalue="off").pack(side="left")
+
 
         # Button Login
         ctk.CTkButton(self.form_frame, text="ĐĂNG NHẬP", height=45, corner_radius=25, font=("Segoe UI", 12, "bold"), fg_color="#0068ff", hover_color="#0056d3", command=self.handle_login).pack(fill="x", pady=(0, 20))
@@ -80,6 +90,8 @@ class LoginWindow(ctk.CTkFrame):
         footer.pack(pady=(10, 0))
         ctk.CTkLabel(footer, text="Chưa có tài khoản?", font=("Segoe UI", 11), text_color="#666").pack(side="left")
         ctk.CTkButton(footer, text="Đăng ký ngay", fg_color="transparent", text_color="#0068ff", font=("Segoe UI", 11, "bold"), width=0, hover=False, command=self.show_register_form).pack(side="left", padx=5)
+
+        self.load_saved_email()
 
     # =========================================================================
     # GIAO DIỆN 2: FORM ĐĂNG KÝ
@@ -118,6 +130,32 @@ class LoginWindow(ctk.CTkFrame):
     def clear_right_frame(self):
         for widget in self.right_frame.winfo_children(): widget.destroy()
 
+    def load_saved_email(self):
+        if os.path.exists(self.session_file):
+            try:
+                with open(self.session_file, 'r') as f:
+                    data = json.load(f)
+                    if "email" in data:
+                        self.entry_email.insert(0, data["email"])
+            except (json.JSONDecodeError, IOError):
+                # If file is corrupted or unreadable, do nothing
+                pass
+
+    def save_credentials(self, email, password):
+        """Lưu email và mật khẩu (đã mã hóa)"""
+        try:
+            # Mã hóa mật khẩu đơn giản bằng base64
+            encoded_pass = base64.b64encode(password.encode()).decode()
+            with open(self.session_file, 'w') as f:
+                json.dump({"email": email, "password": encoded_pass}, f)
+        except IOError as e:
+            print(f"Lỗi khi lưu session: {e}")
+
+    def clear_credentials(self):
+        """Xóa file session khi không muốn ghi nhớ"""
+        if os.path.exists(self.session_file):
+            os.remove(self.session_file)
+
     # =========================================================================
     # XỬ LÝ LOGIC (SOCKET)
     # =========================================================================
@@ -153,6 +191,13 @@ class LoginWindow(ctk.CTkFrame):
             parts = response.split("|")
             token = parts[2]
             username = parts[3]
+
+            # Lưu thông tin nếu người dùng chọn "Ghi nhớ"
+            if self.remember_me_var.get() == "on":
+                self.save_credentials(email, pwd)
+            else:
+                self.clear_credentials()
+
             # messagebox.showinfo("Thành công", f"Chào mừng {username}!")
             # Gọi callback để chuyển màn hình
             if self.on_login_success:

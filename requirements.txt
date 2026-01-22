@@ -3,3 +3,4 @@ bcrypt
 customtkinter
 
 python-dotenv
+pyopenssl

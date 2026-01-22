@@ -58,7 +58,15 @@ class MainApp(ctk.CTk):
             password = base64.b64decode(encoded_pass).decode()
 
             # Thử kết nối và đăng nhập tự động
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            
+            # Create SSL Context
+            import ssl
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            
+            sock = context.wrap_socket(raw_sock, server_hostname='localhost')
             sock.connect(('127.0.0.1', 65432)) # Cần config host/port
             
             cmd = f"AUTH|LOGIN|{email}|{password}"

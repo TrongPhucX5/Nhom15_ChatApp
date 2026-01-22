@@ -8,6 +8,7 @@ import sys
 import base64
 from PIL import Image
 import io
+import ssl
 
 # Thêm đường dẫn để import core.protocol nếu chạy trực tiếp
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -137,7 +138,14 @@ class ChatAppClient(ctk.CTkFrame):
             return True
         
         try:
-            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            
+            import ssl
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            
+            self.client_socket = context.wrap_socket(raw_sock, server_hostname='localhost')
             self.client_socket.connect((self.server_host, self.server_port))
             # Gửi LOGIN dùng Protocol
             # msg = Protocol.pack(f"LOGIN|{self.username}") # Legacy

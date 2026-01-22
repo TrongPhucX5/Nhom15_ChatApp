@@ -163,7 +163,14 @@ class LoginWindow(ctk.CTkFrame):
         """Tạo kết nối socket tới server nếu chưa có"""
         if self.sock: return True
         try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            
+            import ssl
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            
+            self.sock = context.wrap_socket(raw_sock, server_hostname='localhost')
             self.sock.connect((HOST, PORT))
             return True
         except Exception as e:

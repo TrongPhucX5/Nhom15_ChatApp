@@ -2,6 +2,7 @@ import asyncio
 import sys
 import os
 import jwt
+import ssl
 import datetime
 from dotenv import load_dotenv
 
@@ -111,6 +112,7 @@ class AsyncChatServer:
     # --- HANDLE CLIENT ---
     async def handle_client(self, reader, writer):
         addr = writer.get_extra_info('peername')
+        print(f"[SSL] Handshake thành công với {addr}")
         print(f" [CONN] Kết nối mới từ {addr}")
         
         username = "Unknown"
@@ -439,15 +441,26 @@ class AsyncChatServer:
                 print(f"[ERR] Save File Failed: {error}")
 
     async def start(self):
-        server = await asyncio.start_server(self.handle_client, HOST, PORT)
+        # SSL Context
+        ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ssl_ctx.load_cert_chain(certfile=os.path.join(current_dir, "server.crt"), 
+                                keyfile=os.path.join(current_dir, "server.key"))
+
+        server = await asyncio.start_server(self.handle_client, HOST, PORT, ssl=ssl_ctx)
+        
         addr = server.sockets[0].getsockname()
-        print(f" [SERVER] Đang chạy Asynchronous tại {addr}")
-        print(" [INFO] Sẵn sàng chấp nhận JWT Authentication...")
+        print(f" [SERVER] Đang chạy Secure SSL tại {addr}")
+        print(" [INFO] Sẵn sàng chấp nhận kết nối an toàn...")
         async with server:
             await server.serve_forever()
 
 if __name__ == "__main__":
     try:
+        # Check certs
+        if not os.path.exists(os.path.join(current_dir, "server.crt")) or not os.path.exists(os.path.join(current_dir, "server.key")):
+             print(" [ERROR] Không tìm thấy chứng chỉ SSL (server.crt, server.key). Vui lòng chạy generate_cert_v2.py trước.")
+             sys.exit(1)
+
         server = AsyncChatServer()
         asyncio.run(server.start())
     except KeyboardInterrupt:

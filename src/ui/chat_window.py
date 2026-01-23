@@ -100,6 +100,10 @@ class ChatAppClient(ctk.CTkFrame):
         self.group_list_data = [] # Store list of joined groups
         self.unread_counts = {} # Store unread messages count per group {group_name: int}
         self.msg_status_queues = {} # {receiver_name: [label1, label2, ...]}
+        
+        # --- REACTION STATE ---
+        self.message_widgets = {} # {message_id: {"bubble": frame, "reaction_frame": frame}}
+        self.current_reactions = {} # {message_id: {"❤️": ["Alice", "Bob"], "👍": ["Charlie"]}}
 
         # Layout 3 cột
         self.grid_columnconfigure(0, minsize=70)   # Nav
@@ -798,23 +802,14 @@ class ChatAppClient(ctk.CTkFrame):
                 # Gửi tin nhóm: GROUP_MSG|group_name|content
                 data = Protocol.pack(f"GROUP_MSG|{self.target_name}|{msg}")
                 self.client_socket.sendall(data)
-                # Hiển thị ngay
-                self.add_message_bubble("Bạn", msg, is_me=True, msg_type="text")
+                # KHÔNG hiển thị ngay, đợi server broadcast lại với message_id
             else:
                 # Private or General
                 target = self.target_name if self.target_name else "General"
                 # Protocol: MSG|receiver|content
                 data = Protocol.pack(f"MSG|{target}|{msg}")
                 self.client_socket.sendall(data)
-                
-                lbl = self.add_message_bubble("Bạn", msg, is_me=True, msg_type="text")
-                
-                # Queue for status update (Only for Private)
-                if self.chat_mode == "PRIVATE" and target != "General":
-                    if target not in self.msg_status_queues:
-                        self.msg_status_queues[target] = []
-                    # Append (Store weakref or just ref? Ref is fine as bubble exists)
-                    if lbl: self.msg_status_queues[target].append(lbl)
+                # KHÔNG tự tạo bubble, đợi server broadcast lại với message_id
             
             self.entry_msg.delete(0, "end")
         except: pass
@@ -945,7 +940,7 @@ class ChatAppClient(ctk.CTkFrame):
         # Refresh Sidebar UI (Refresh highlight)
         self.update_user_list_ui()
 
-    def add_message_bubble(self, sender, content, is_me, msg_type="text", file_data=None, timestamp_str=None):
+    def add_message_bubble(self, sender, content, is_me, msg_type="text", file_data=None, timestamp_str=None, message_id=None):
         if is_me:
             bg, align, anchor = ZALO_BUBBLE_ME, "right", "e"
             txt_col = TEXT_COLOR_ME
@@ -1067,9 +1062,41 @@ class ChatAppClient(ctk.CTkFrame):
              status_lbl = ctk.CTkLabel(info_frame, text=code, font=("Arial", 10, "bold"), text_color=ts_col)
              status_lbl.pack(side="left", padx=(3, 0))
         
-        return status_lbl # Return for queuing
-
+        # --- REACTION FRAME ---
+        reaction_frame = ctk.CTkFrame(row, fg_color="transparent")
+        reaction_frame.pack(side=align, anchor=anchor, padx=(8 if not is_me else 0, 0))
+        
+        # Store reference to widgets if message_id exists
+        if message_id:
+            self.message_widgets[message_id] = {
+                "bubble": bubble,
+                "reaction_frame": reaction_frame,
+                "row": row
+            }
+            
+            # Bind right-click sau khi tất cả widgets đã được tạo
+            def bind_recursive(widget):
+                widget.bind("<Button-3>", lambda e, mid=message_id: self.show_reaction_popup(e, mid))
+                try:
+                    for child in widget.winfo_children():
+                        bind_recursive(child)
+                except:
+                    pass
+            
+            self.after(10, lambda: bind_recursive(bubble))
+            print(f"[DEBUG] Bound right-click for message_id: {message_id}")  # Debug
+        
         # Smart Auto-scroll
+        # Only scroll if user is near bottom (e.g. within last 10%)
+        # But if it's MY message, always scroll.
+        try:
+             y_pos = self.msg_area._parent_canvas.yview()[1]
+             if is_me or y_pos > 0.9:
+                 self.msg_area._parent_canvas.yview_moveto(1.0)
+        except:
+             pass
+        
+        return status_lbl # Return for queuing
         # Only scroll if user is near bottom (e.g. within last 10%)
         # But if it's MY message, always scroll.
         try:
@@ -1103,6 +1130,136 @@ class ChatAppClient(ctk.CTkFrame):
         except Exception as e:
             messagebox.showerror("Lỗi lưu file", str(e))
 
+    # --- REACTION METHODS ---
+    def show_reaction_popup(self, event, message_id):
+        """Hiển thị popup emoji khi right-click tin nhắn"""
+        print(f"[DEBUG] show_reaction_popup called for message_id: {message_id}")  # Debug
+        
+        # Danh sách emoji với màu sắc
+        emoji_data = [
+            ("❤️", "#ffebee", "#d32f2f"),  # Red
+            ("👍", "#e3f2fd", "#1976d2"),  # Blue
+            ("😂", "#fff3e0", "#f57c00"),  # Orange
+            ("😮", "#f3e5f5", "#7b1fa2"),  # Purple
+            ("😢", "#e1f5fe", "#0288d1"),  # Sky blue
+            ("😡", "#fce4ec", "#c2185b"),  # Pink
+        ]
+        
+        # Tạo popup window lớn hơn
+        popup = ctk.CTkToplevel(self)
+        popup.title("")
+        popup.geometry(f"380x80+{event.x_root-50}+{event.y_root-40}")
+        popup.overrideredirect(True)
+        popup.attributes("-topmost", True)
+        popup.configure(fg_color="#ffffff")
+        
+        # Add shadow effect with border
+        popup_bg = ctk.CTkFrame(popup, fg_color="#ffffff", corner_radius=20, border_width=1, border_color="#d0d0d0")
+        popup_bg.pack(fill="both", expand=True, padx=4, pady=4)
+        
+        # Frame chứa emoji buttons
+        emoji_frame = ctk.CTkFrame(popup_bg, fg_color="transparent")
+        emoji_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        for emoji, bg_color, text_color in emoji_data:
+            btn = ctk.CTkButton(
+                emoji_frame, 
+                text=emoji, 
+                width=50, 
+                height=50,
+                font=("Segoe UI Emoji", 24),
+                fg_color=bg_color,
+                hover_color=bg_color,
+                text_color=text_color,
+                corner_radius=25,
+                border_width=0,
+                command=lambda e=emoji: self.send_reaction(message_id, e, popup)
+            )
+            btn.pack(side="left", padx=2)
+            
+            # Animation effect on hover
+            def on_enter(event, b=btn):
+                b.configure(width=55, height=55, border_width=3, border_color=text_color)
+            def on_leave(event, b=btn):
+                b.configure(width=50, height=50, border_width=0)
+            
+            btn.bind("<Enter>", on_enter)
+            btn.bind("<Leave>", on_leave)
+        
+        # Close popup khi click ra ngoài
+        popup.bind("<FocusOut>", lambda e: popup.destroy())
+        popup.focus()
+
+    def send_reaction(self, message_id, emoji, popup=None):
+        """Gửi reaction lên server"""
+        try:
+            cmd = f"REACTION|ADD|{message_id}|{emoji}"
+            self.client_socket.sendall(Protocol.pack(cmd))
+            print(f"[CLIENT] Sent reaction: {emoji} on message {message_id}")
+            
+            if popup:
+                popup.destroy()
+        except Exception as e:
+            print(f"[CLIENT] Error sending reaction: {e}")
+
+    def update_reactions_display(self, message_id, reactions_dict):
+        """Cập nhật hiển thị reactions cho một tin nhắn
+        reactions_dict: {"❤️": ["Alice", "Bob"], "👍": ["Charlie"]}
+        """
+        if message_id not in self.message_widgets:
+            return
+        
+        reaction_frame = self.message_widgets[message_id]["reaction_frame"]
+        
+        # Xóa reactions cũ
+        for widget in reaction_frame.winfo_children():
+            widget.destroy()
+        
+        # Nếu không có reactions, không hiển thị gì
+        if not reactions_dict:
+            return
+        
+        # Màu sắc cho từng emoji (bg, text, hover)
+        emoji_colors = {
+            "❤️": ("#ffebee", "#d32f2f", "#ffcdd2"),  # Red
+            "👍": ("#e3f2fd", "#1976d2", "#bbdefb"),  # Blue
+            "😂": ("#fff3e0", "#f57c00", "#ffe0b2"),  # Orange
+            "😮": ("#f3e5f5", "#7b1fa2", "#e1bee7"),  # Purple
+            "😢": ("#e1f5fe", "#0288d1", "#b3e5fc"),  # Sky blue
+            "😡": ("#fce4ec", "#c2185b", "#f8bbd0"),  # Pink
+        }
+        
+        # Hiển thị reactions mới
+        for emoji, users in reactions_dict.items():
+            count = len(users)
+            users_str = ", ".join(users)
+            
+            # Lấy màu cho emoji (bg, text, hover)
+            colors = emoji_colors.get(emoji, ("#f0f0f0", "#333", "#e0e0e0"))
+            
+            # Check if current user reacted
+            is_my_reaction = self.username in users
+            
+            # Button hiển thị emoji + count với màu sắc
+            btn = ctk.CTkButton(
+                reaction_frame,
+                text=f"{emoji} {count}",
+                width=55,
+                height=28,
+                font=("Segoe UI Emoji", 12, "bold" if is_my_reaction else "normal"),
+                fg_color=colors[0],
+                text_color=colors[1],
+                hover_color=colors[2],
+                corner_radius=14,
+                border_width=2 if is_my_reaction else 0,
+                border_color=colors[1] if is_my_reaction else None,
+                command=lambda e=emoji, u=users_str: messagebox.showinfo("Reactions", f"{e}\n\n{u}")
+            )
+            btn.pack(side="left", padx=3, pady=2)
+        
+        # Update stored reactions
+        self.current_reactions[message_id] = reactions_dict
+
     def receive_loop(self):
         while self.is_running and self.client_socket:
             res_type = None # Initialize to avoid UnboundLocalError
@@ -1117,36 +1274,66 @@ class ChatAppClient(ctk.CTkFrame):
                 cmd = parts[0]
 
                 if cmd == "MSG":
-                    # MSG|sender|content
-                    sender, content = parts[1], parts[2]
+                    # MSG|sender|content|message_id (optional)
+                    sender = parts[1]
+                    content = parts[2]
+                    message_id = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else None
                     
-                    if sender != self.username:
+                    # Hiển thị tin nhắn General của chính mình
+                    if sender == self.username:
+                        # Chỉ hiển thị nếu đang ở General (HOME)
+                        if self.chat_mode == "HOME":
+                            self.after(0, lambda c=content, mid=message_id: self.add_message_bubble("Bạn", c, is_me=True, msg_type="text", message_id=mid))
+                    else:
                         # Logic Chat 1-1 (Giả lập Private từ Broadcast)
                         # Chỉ hiển thị nếu đang chat với đúng người này
                         if self.chat_mode == "PRIVATE" and self.target_name == sender:
-                             self.after(0, lambda s=sender, c=content: self.add_message_bubble(s, c, is_me=False, msg_type="text"))
+                             self.after(0, lambda s=sender, c=content, mid=message_id: self.add_message_bubble(s, c, is_me=False, msg_type="text", message_id=mid))
                         else:
                              # Nếu đang ở nhóm hoặc người khác -> Tính là tin nhắn chờ (Unread)
                              self.unread_counts[sender] = self.unread_counts.get(sender, 0) + 1
                              self.after(0, self.update_user_list_ui)
 
                 elif cmd == "GROUP_MSG":
-                    # GROUP_MSG|group_name|sender|content
+                    # GROUP_MSG|group_name|sender|content|message_id (optional)
                     g_name, sender, content = parts[1], parts[2], parts[3]
+                    message_id = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else None
                     
                     # Logic: Nếu đang ở trong Group đó thì hiện
                     if self.chat_mode == "GROUP" and self.target_name == g_name:
-                        self.after(0, lambda s=sender, c=content: self.add_message_bubble(f"{s}", c, is_me=False, msg_type="text"))
+                        is_me = (sender == self.username)
+                        display_name = "Bạn" if is_me else sender
+                        self.after(0, lambda s=display_name, c=content, im=is_me, mid=message_id: 
+                                  self.add_message_bubble(s, c, is_me=im, msg_type="text", message_id=mid))
                     else:
-                        # Increment Unread Count
-                        self.unread_counts[g_name] = self.unread_counts.get(g_name, 0) + 1
-                        self.after(0, self.update_user_list_ui)
+                        # Increment Unread Count (chỉ khi không phải tin nhắn của mình)
+                        if sender != self.username:
+                            self.unread_counts[g_name] = self.unread_counts.get(g_name, 0) + 1
+                            self.after(0, self.update_user_list_ui)
 
                 elif cmd == "FILE":
                     # FILE|sender|filename|b64
                     sender, filename, b64 = parts[1], parts[2], parts[3]
                     if sender != self.username:
                         self.after(0, lambda s=sender, f=filename, b=b64: self.add_message_bubble(s, f, is_me=False, msg_type="file", file_data=b))
+
+                elif cmd == "REACTION":
+                    # REACTION|UPDATE|message_id|reactions_str
+                    # reactions_str format: "❤️:Alice,Bob;👍:Charlie"
+                    if len(parts) >= 4 and parts[1] == "UPDATE":
+                        message_id = int(parts[2])
+                        reactions_str = parts[3] if len(parts) > 3 else ""
+                        
+                        # Parse reactions
+                        reactions_dict = {}
+                        if reactions_str:
+                            for reaction_group in reactions_str.split(";"):
+                                if ":" in reaction_group:
+                                    emoji, users_str = reaction_group.split(":", 1)
+                                    reactions_dict[emoji] = users_str.split(",")
+                        
+                        # Update UI
+                        self.after(0, lambda mid=message_id, rd=reactions_dict: self.update_reactions_display(mid, rd))
 
                 elif cmd == "TYPING":
                      # TYPING|group|user
@@ -1349,13 +1536,18 @@ class ChatAppClient(ctk.CTkFrame):
     def render_history(self, history):
         """Hiển thị danh sách tin nhắn lịch sử"""
         for msg in history:
+            msg_id = msg.get('id', None)
             sender = msg.get('sender', 'Unknown')
             content = msg.get('content', '')
             timestamp = msg.get('timestamp', '')
             msg_type = msg.get('type', 'text')
             
             is_me = (sender == self.username)
-            self.add_message_bubble(sender, content, is_me, msg_type, file_data=None, timestamp_str=timestamp)
+            self.add_message_bubble(sender, content, is_me, msg_type, file_data=None, timestamp_str=timestamp, message_id=msg_id)
+            
+            # Load reactions cho tin nhắn này nếu có
+            if msg_id and msg_id in self.current_reactions:
+                self.update_reactions_display(msg_id, self.current_reactions[msg_id])
         
         # Force scroll to bottom after loading history
         try:

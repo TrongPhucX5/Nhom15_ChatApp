@@ -4,6 +4,7 @@ import os
 import jwt
 import ssl
 import datetime
+import base64
 from dotenv import load_dotenv
 
 # --- 1. Setup Path ---
@@ -183,6 +184,7 @@ class AsyncChatServer:
             # --- SAU KHI LOGIN THÀNH CÔNG ---
             self.clients[writer] = username
             print(f" [LOGIN] {username} đã tham gia.")
+            print(f" [LOGIN] {username} đã tham gia.")
             await self.broadcast_user_list()
 
             # Gửi danh sách nhóm đã tham gia
@@ -226,6 +228,8 @@ class AsyncChatServer:
              await self._handle_other_cmds(writer, username, cmd, parts)
         elif cmd == "FILE":
              await self._handle_file(writer, username, parts)
+        elif cmd == "REACTION":
+             await self._handle_reaction(writer, username, parts)
         else:
              print(f" [WARN] Unknown command from {username}: {msg}")
 
@@ -239,25 +243,29 @@ class AsyncChatServer:
 
         print(f"💬 [{username} -> {receiver}]: {content}")
         
+        message_id = None
         if self.db: 
            loop = asyncio.get_running_loop()
-           await loop.run_in_executor(None, self.db.save_message, username, receiver, content, "text", None)
+           message_id = await loop.run_in_executor(None, self.db.save_message, username, receiver, content, "text", None)
         
-        # Ack to sender (Sent)
+        # Ack to sender (Sent) with message_id
         try:
-            writer.write(Protocol.pack(f"MSG_SENT|{receiver}"))
+            ack_msg = f"MSG_SENT|{receiver}|{message_id}" if message_id else f"MSG_SENT|{receiver}"
+            writer.write(Protocol.pack(ack_msg))
             await writer.drain()
         except: pass
 
         if receiver == "General":
-            response = f"MSG|{username}|{content}"
-            await self.broadcast(response, exclude_writer=writer)
+            response = f"MSG|{username}|{content}|{message_id}" if message_id else f"MSG|{username}|{content}"
+            # Broadcast cho TẤT CẢ kể cả người gửi để họ có message_id
+            await self.broadcast(response, exclude_writer=None)
         else:
             # Private
             found = False
             for w, u in self.clients.items():
                 if u == receiver:
-                    w.write(Protocol.pack(f"MSG|{username}|{content}"))
+                    private_msg = f"MSG|{username}|{content}|{message_id}" if message_id else f"MSG|{username}|{content}"
+                    w.write(Protocol.pack(private_msg))
                     await w.drain()
                     found = True
                     # Notify sender (Delivered)
@@ -285,10 +293,16 @@ class AsyncChatServer:
             if len(parts) >= 3:
                 g_name, content = parts[1], parts[2]
                 print(f"🛡️ [{username} -> {g_name}]: {content}")
+                message_id = None
                 if self.db:
                     loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(None, self.db.save_message, username, g_name, content, "text", None)
-                await self.broadcast_group(g_name, f"GROUP_MSG|{g_name}|{username}|{content}", exclude_writer=writer)
+                    message_id = await loop.run_in_executor(None, self.db.save_message, username, g_name, content, "text", None)
+                # Broadcast với message_id nếu có
+                msg_data = f"GROUP_MSG|{g_name}|{username}|{content}"
+                if message_id:
+                    msg_data += f"|{message_id}"
+                # Gửi cho TẤT CẢ members kể cả người gửi để họ có message_id
+                await self.broadcast_group(g_name, msg_data, exclude_writer=None)
 
         elif cmd == "GROUP_JOIN":
             g_name = parts[1]
@@ -355,8 +369,9 @@ class AsyncChatServer:
         import json
         hist_data = []
         for row in history:
+            # row format: (id, sender, content, timestamp, msg_type, file_path)
             hist_data.append({
-                "sender": row[0], "content": row[1], "timestamp": row[2], "type": row[3], "file": row[4]
+                "id": row[0], "sender": row[1], "content": row[2], "timestamp": row[3], "type": row[4], "file": row[5]
             })
         json_str = json.dumps(hist_data)
         writer.write(Protocol.pack(f"HISTORY_DATA|{target}|{json_str}"))
@@ -439,6 +454,33 @@ class AsyncChatServer:
                 await self.broadcast(response, exclude_writer=writer)
             else:
                 print(f"[ERR] Save File Failed: {error}")
+
+    async def _handle_reaction(self, writer, username, parts):
+        """Xử lý REACTION|ADD|message_id|emoji hoặc REACTION|REMOVE|message_id|emoji"""
+        if len(parts) < 4:
+            return
+        
+        action, message_id, emoji = parts[1], int(parts[2]), parts[3]
+        
+        if not self.db:
+            return
+        
+        loop = asyncio.get_running_loop()
+        
+        if action == "ADD":
+            # add_reaction tự động toggle (thêm hoặc xóa)
+            result = await loop.run_in_executor(None, self.db.add_reaction, message_id, username, emoji)
+            print(f"👍 [{username}] {result} reaction {emoji} on message {message_id}")
+        
+        # Lấy tất cả reactions của tin nhắn
+        reactions_dict = await loop.run_in_executor(None, self.db.get_message_reactions, message_id)
+        
+        # Serialize reactions: {"❤️": ["Alice", "Bob"]} -> "❤️:Alice,Bob;👍:Charlie"
+        reactions_str = ";".join([f"{emoji}:{','.join(users)}" for emoji, users in reactions_dict.items()])
+        
+        # Broadcast update cho tất cả clients
+        response = f"REACTION|UPDATE|{message_id}|{reactions_str}"
+        await self.broadcast(response)
 
     async def start(self):
         # SSL Context

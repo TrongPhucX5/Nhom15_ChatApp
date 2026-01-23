@@ -71,6 +71,18 @@ class DBHandler:
             )
         ''')
         
+        # Bảng Reactions
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS reactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id INTEGER,
+                username TEXT,
+                emoji TEXT,
+                timestamp TEXT,
+                UNIQUE(message_id, username, emoji)
+            )
+        ''')
+        
         # Seed Default Admin
         cursor.execute("SELECT * FROM users WHERE email='admin'")
         if not cursor.fetchone():
@@ -219,10 +231,13 @@ class DBHandler:
                 VALUES (?, ?, ?, ?, ?, ?)
             ''', (sender, receiver, msg, now_full, msg_type, file_path))
             
+            message_id = cursor.lastrowid
             conn.commit()
             conn.close()
+            return message_id
         except Exception as e:
             print(f"[DB] Lỗi save_message: {e}")
+            return None
 
     def get_history(self, user1, user2, limit=50):
         """Lấy lịch sử chat riêng giữa 2 user"""
@@ -232,7 +247,7 @@ class DBHandler:
             
             # Query messages where (sender=u1 AND receiver=u2) OR (sender=u2 AND receiver=u1)
             cursor.execute('''
-                SELECT sender, content, timestamp, msg_type, file_path 
+                SELECT id, sender, content, timestamp, msg_type, file_path 
                 FROM messages 
                 WHERE (sender=? AND receiver=?) OR (sender=? AND receiver=?)
                 ORDER BY id DESC LIMIT ?
@@ -252,7 +267,7 @@ class DBHandler:
             
             # Query messages where receiver=group_name
             cursor.execute('''
-                SELECT sender, content, timestamp, msg_type, file_path
+                SELECT id, sender, content, timestamp, msg_type, file_path
                 FROM messages
                 WHERE receiver=?
                 ORDER BY id DESC LIMIT ?
@@ -405,4 +420,67 @@ class DBHandler:
     def log_user(self, username):
         pass # Đã xử lý trong check_login
 
+    # --- REACTION METHODS ---
+    def add_reaction(self, message_id, username, emoji):
+        """Thêm reaction cho tin nhắn. Nếu đã react cùng emoji -> toggle off (xóa)"""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            cursor = conn.cursor()
+            
+            # Check nếu đã react emoji này
+            cursor.execute('''
+                SELECT id FROM reactions 
+                WHERE message_id=? AND username=? AND emoji=?
+            ''', (message_id, username, emoji))
+            
+            if cursor.fetchone():
+                # Đã react -> Xóa (toggle off)
+                cursor.execute('''
+                    DELETE FROM reactions 
+                    WHERE message_id=? AND username=? AND emoji=?
+                ''', (message_id, username, emoji))
+                conn.commit()
+                conn.close()
+                return "removed"
+            else:
+                # Chưa react -> Thêm mới
+                now = str(datetime.datetime.now())
+                cursor.execute('''
+                    INSERT INTO reactions (message_id, username, emoji, timestamp)
+                    VALUES (?, ?, ?, ?)
+                ''', (message_id, username, emoji, now))
+                conn.commit()
+                conn.close()
+                return "added"
+        except Exception as e:
+            print(f"[DB] Lỗi add_reaction: {e}")
+            return "error"
 
+    def get_message_reactions(self, message_id):
+        """Lấy tất cả reactions của một tin nhắn
+        Returns: {"❤️": ["Alice", "Bob"], "👍": ["Charlie"]}
+        """
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT emoji, username FROM reactions 
+                WHERE message_id=?
+                ORDER BY timestamp ASC
+            ''', (message_id,))
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            # Group by emoji
+            reactions = {}
+            for emoji, username in rows:
+                if emoji not in reactions:
+                    reactions[emoji] = []
+                reactions[emoji].append(username)
+            
+            return reactions
+        except Exception as e:
+            print(f"[DB] Lỗi get_message_reactions: {e}")
+            return {}

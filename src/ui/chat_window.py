@@ -1434,12 +1434,18 @@ class ChatAppClient(ctk.CTkFrame):
                     content = parts[2]
                     message_id = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else None
                     
-                    # Hiển thị tin nhắn General của chính mình
+                    # Xác định receiver từ nội dung gói tin (nếu có parts[4]) hoặc mặc định là General
+                    receiver = parts[4] if len(parts) > 4 else "General"
+                    
+                    # Nếu là tin nhắn của chính mình
                     if sender == self.username:
-                        # Chỉ hiển thị nếu đang ở General (HOME)
-                        if self.chat_mode == "HOME":
+                        # Hiển thị nếu đang ở General (HOME) hoặc đang chat với receiver (PRIVATE)
+                        if self.chat_mode == "HOME" and receiver == "General":
+                            self.after(0, lambda c=content, mid=message_id: self.add_message_bubble("Bạn", c, is_me=True, msg_type="text", message_id=mid))
+                        elif self.chat_mode == "PRIVATE" and self.target_name == receiver:
                             self.after(0, lambda c=content, mid=message_id: self.add_message_bubble("Bạn", c, is_me=True, msg_type="text", message_id=mid))
                     else:
+                        # Tin nhắn từ người khác
                         # Logic Chat 1-1 (Giả lập Private từ Broadcast)
                         # Chỉ hiển thị nếu đang chat với đúng người này
                         if self.chat_mode == "PRIVATE" and self.target_name == sender:

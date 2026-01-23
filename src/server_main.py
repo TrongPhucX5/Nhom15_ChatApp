@@ -287,15 +287,17 @@ class AsyncChatServer:
         except: pass
 
         if receiver == "General":
-            response = f"MSG|{username}|{content}|{message_id}" if message_id else f"MSG|{username}|{content}"
+            response = f"MSG|{username}|{content}|{message_id}|{receiver}" if message_id else f"MSG|{username}|{content}||{receiver}"
             # Broadcast cho TẤT CẢ kể cả người gửi để họ có message_id
             await self.broadcast(response, exclude_writer=None)
         else:
-            # Private
+            # Private - Gửi cho cả người gửi và người nhận
+            private_msg = f"MSG|{username}|{content}|{message_id}|{receiver}" if message_id else f"MSG|{username}|{content}||{receiver}"
+            
+            # Gửi cho người nhận
             found = False
             for w, u in self.clients.items():
                 if u == receiver:
-                    private_msg = f"MSG|{username}|{content}|{message_id}" if message_id else f"MSG|{username}|{content}"
                     w.write(Protocol.pack(private_msg))
                     await w.drain()
                     found = True
@@ -305,6 +307,12 @@ class AsyncChatServer:
                         await writer.drain()
                     except: pass
                     break
+            
+            # Gửi lại cho chính người gửi để họ thấy tin nhắn của mình
+            try:
+                writer.write(Protocol.pack(private_msg))
+                await writer.drain()
+            except: pass
 
     async def _handle_group(self, writer, username, cmd, parts):
         if cmd == "GROUP_CREATE":

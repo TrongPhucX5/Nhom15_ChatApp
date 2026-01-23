@@ -257,6 +257,8 @@ class AsyncChatServer:
              await self._handle_file(writer, username, parts)
         elif cmd == "REACTION":
              await self._handle_reaction(writer, username, parts)
+        elif cmd == "DELETE_MSG":
+             await self._handle_delete_message(writer, username, parts)
 
         elif cmd.startswith("FILE_"):
              await self._handle_file_stream(writer, username, cmd, parts)
@@ -408,9 +410,15 @@ class AsyncChatServer:
         import json
         hist_data = []
         for row in history:
-            # row format: (id, sender, content, timestamp, msg_type, file_path)
+            # row format: (id, sender, content, timestamp, msg_type, file_path, deleted)
             hist_data.append({
-                "id": row[0], "sender": row[1], "content": row[2], "timestamp": row[3], "type": row[4], "file": row[5]
+                "id": row[0], 
+                "sender": row[1], 
+                "content": row[2], 
+                "timestamp": row[3], 
+                "type": row[4], 
+                "file": row[5],
+                "deleted": row[6] if len(row) > 6 else None
             })
         json_str = json.dumps(hist_data)
         writer.write(Protocol.pack(f"HISTORY_DATA|{target}|{json_str}"))
@@ -477,6 +485,74 @@ class AsyncChatServer:
                 else:
                     writer.write(Protocol.pack("CMD_RES|GET_INFO|Error|Error|"))
                 await writer.drain()
+
+    async def _handle_delete_message(self, writer, username, parts):
+        """Xử lý thu hồi tin nhắn
+        Format: DELETE_MSG|message_id|receiver
+        """
+        if len(parts) < 3:
+            writer.write(Protocol.pack("ERR|Invalid delete command"))
+            await writer.drain()
+            return
+        
+        try:
+            message_id = int(parts[1])
+            receiver = parts[2]
+        except ValueError:
+            writer.write(Protocol.pack("ERR|Invalid message ID"))
+            await writer.drain()
+            return
+        
+        if not self.db:
+            writer.write(Protocol.pack("ERR|Database not available"))
+            await writer.drain()
+            return
+        
+        # Gọi DB để xóa
+        loop = asyncio.get_running_loop()
+        success, msg, delete_time = await loop.run_in_executor(
+            None, self.db.delete_message, message_id, username
+        )
+        
+        if success:
+            print(f"🗑️ [{username}] deleted message {message_id}")
+            
+            # Gửi ACK cho người xóa
+            writer.write(Protocol.pack(f"MSG_DELETED|{message_id}|success"))
+            await writer.drain()
+            
+            # Broadcast đến tất cả (hoặc chỉ trong group/private chat)
+            # Format: MSG_DELETED|message_id|username
+            broadcast_msg = f"MSG_DELETED|{message_id}|{username}"
+            
+            if receiver == "General":
+                # Broadcast cho tất cả
+                await self.broadcast(broadcast_msg, exclude_writer=None)
+            else:
+                # Kiểm tra xem receiver có phải là group không
+                is_group = False
+                if self.db:
+                    loop = asyncio.get_running_loop()
+                    user_groups = await loop.run_in_executor(None, self.db.get_user_groups, username)
+                    is_group = receiver in user_groups
+                
+                if is_group:
+                    # Group message - broadcast to group
+                    await self.broadcast_group(receiver, broadcast_msg, exclude_writer=None)
+                else:
+                    # Private message - gửi cho cả 2 người (sender và receiver)
+                    for w, u in self.clients.items():
+                        if u == receiver or u == username:
+                            try:
+                                w.write(Protocol.pack(broadcast_msg))
+                                await w.drain()
+                                print(f"  [DELETE] Sent MSG_DELETED to {u}")
+                            except Exception as e:
+                                print(f"  [DELETE] Error sending to {u}: {e}")
+        else:
+            # Gửi lỗi
+            writer.write(Protocol.pack(f"ERR|{msg}"))
+            await writer.drain()
 
     async def _handle_file_stream(self, writer, username, cmd, parts):
         """

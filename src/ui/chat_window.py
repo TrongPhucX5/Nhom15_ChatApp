@@ -1172,7 +1172,7 @@ class ChatAppClient(ctk.CTkFrame):
             
             # Bind right-click sau khi tất cả widgets đã được tạo
             def bind_recursive(widget):
-                widget.bind("<Button-3>", lambda e, mid=message_id: self.show_reaction_popup(e, mid))
+                widget.bind("<Button-3>", lambda e, mid=message_id, im=is_me: self.show_message_context_menu(e, mid, im))
                 try:
                     for child in widget.winfo_children():
                         bind_recursive(child)
@@ -1286,6 +1286,36 @@ class ChatAppClient(ctk.CTkFrame):
             messagebox.showerror("Lỗi lưu file", str(e))
 
     # --- REACTION METHODS ---
+    def show_message_context_menu(self, event, message_id, is_me):
+        """Hiển thị context menu với reactions và delete option"""
+        from tkinter import Menu
+        
+        menu = Menu(self, tearoff=0, bg="white", fg="black", font=("Segoe UI", 10))
+        
+        # Add Reaction submenu
+        reaction_menu = Menu(menu, tearoff=0, bg="white", fg="black")
+        emoji_list = ["❤️", "👍", "😂", "😮", "😢", "😡"]
+        for emoji in emoji_list:
+            reaction_menu.add_command(
+                label=emoji, 
+                command=lambda e=emoji: self.send_reaction(message_id, e)
+            )
+        menu.add_cascade(label="🎭 Phản ứng", menu=reaction_menu)
+        
+        # Add Delete option (only for own messages)
+        if is_me:
+            menu.add_separator()
+            menu.add_command(
+                label="🗑️ Thu hồi tin nhắn", 
+                command=lambda: self.delete_message(message_id)
+            )
+        
+        # Show menu
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+    
     def show_reaction_popup(self, event, message_id):
         """Hiển thị popup emoji khi right-click tin nhắn"""
         print(f"[DEBUG] show_reaction_popup called for message_id: {message_id}")  # Debug
@@ -1356,6 +1386,51 @@ class ChatAppClient(ctk.CTkFrame):
                 popup.destroy()
         except Exception as e:
             print(f"[CLIENT] Error sending reaction: {e}")
+
+    def delete_message(self, message_id):
+        """Thu hồi tin nhắn"""
+        confirm = messagebox.askyesno(
+            "Xác nhận", 
+            "Bạn có chắc muốn thu hồi tin nhắn này?\n(Chỉ có thể thu hồi trong vòng 5 phút)"
+        )
+        if not confirm:
+            return
+        
+        try:
+            # Gửi lệnh xóa: DELETE_MSG|message_id|receiver
+            receiver = self.target_name if self.target_name else "General"
+            cmd = f"DELETE_MSG|{message_id}|{receiver}"
+            self.client_socket.sendall(Protocol.pack(cmd))
+            print(f"[CLIENT] Sent delete request for message {message_id}")
+        except Exception as e:
+            print(f"[CLIENT] Error deleting message: {e}")
+            messagebox.showerror("Lỗi", f"Không thể thu hồi tin nhắn: {e}")
+
+    def handle_message_deleted(self, message_id):
+        """Xử lý khi tin nhắn bị xóa - cập nhật UI"""
+        if message_id not in self.message_widgets:
+            return
+        
+        widgets = self.message_widgets[message_id]
+        bubble = widgets["bubble"]
+        
+        # Xóa nội dung cũ trong bubble
+        for child in bubble.winfo_children():
+            child.destroy()
+        
+        # Hiển thị "Tin nhắn đã bị thu hồi"
+        bubble.configure(fg_color=("#f0f0f0", "#2a2a2a"))
+        ctk.CTkLabel(
+            bubble, 
+            text="🚫 Tin nhắn đã bị thu hồi",
+            font=("Segoe UI", 12, "italic"),
+            text_color=("gray", "#888")
+        ).pack(padx=15, pady=10)
+        
+        # Xóa reactions
+        reaction_frame = widgets["reaction_frame"]
+        for child in reaction_frame.winfo_children():
+            child.destroy()
 
     def update_reactions_display(self, message_id, reactions_dict):
         """Cập nhật hiển thị reactions cho một tin nhắn
@@ -1574,6 +1649,17 @@ class ChatAppClient(ctk.CTkFrame):
                         # Update UI
                         self.after(0, lambda mid=message_id, rd=reactions_dict: self.update_reactions_display(mid, rd))
 
+                elif cmd == "MSG_DELETED":
+                    # MSG_DELETED|message_id|username
+                    if len(parts) >= 2:
+                        try:
+                            message_id = int(parts[1])
+                            deleter = parts[2] if len(parts) > 2 else "Unknown"
+                            print(f"[CLIENT] Message {message_id} deleted by {deleter}")
+                            self.after(0, lambda mid=message_id: self.handle_message_deleted(mid))
+                        except ValueError:
+                            print(f"[CLIENT] Invalid message_id in MSG_DELETED: {parts[1]}")
+
                 elif cmd == "TYPING":
                      # TYPING|group|user
                      if len(parts) >= 3:
@@ -1791,18 +1877,70 @@ class ChatAppClient(ctk.CTkFrame):
             content = msg.get('content', '')
             timestamp = msg.get('timestamp', '')
             msg_type = msg.get('type', 'text')
+            deleted = msg.get('deleted', None)
             
             is_me = (sender == self.username)
-            self.add_message_bubble(sender, content, is_me, msg_type, file_data=None, timestamp_str=timestamp, message_id=msg_id)
             
-            # Load reactions cho tin nhắn này nếu có
-            if msg_id and msg_id in self.current_reactions:
-                self.update_reactions_display(msg_id, self.current_reactions[msg_id])
+            # Nếu tin nhắn đã bị xóa, hiển thị dạng deleted
+            if deleted:
+                self.add_deleted_message_bubble(sender, is_me, timestamp, msg_id)
+            else:
+                self.add_message_bubble(sender, content, is_me, msg_type, file_data=None, timestamp_str=timestamp, message_id=msg_id)
+                
+                # Load reactions cho tin nhắn này nếu có
+                if msg_id and msg_id in self.current_reactions:
+                    self.update_reactions_display(msg_id, self.current_reactions[msg_id])
         
         # Force scroll to bottom after loading history
         try:
             self.msg_area._parent_canvas.yview_moveto(1.0)
         except: pass
+
+    def add_deleted_message_bubble(self, sender, is_me, timestamp_str=None, message_id=None):
+        """Hiển thị tin nhắn đã bị thu hồi trong lịch sử"""
+        if is_me:
+            bg, align, anchor = ("#f0f0f0", "#2a2a2a"), "right", "e"
+        else:
+            bg, align, anchor = ("#f0f0f0", "#2a2a2a"), "left", "w"
+
+        row = ctk.CTkFrame(self.msg_area, fg_color="transparent")
+        row.pack(fill="x", pady=2, padx=20)
+
+        if not is_me:
+            ctk.CTkButton(row, text=sender[0], width=28, height=28, corner_radius=14, 
+                          fg_color=("#e6e8eb", "#333"), text_color="#555", hover=False, font=("Arial", 10, "bold")).pack(side="left", anchor="s", pady=(0,5))
+
+        bubble = ctk.CTkFrame(row, fg_color=bg, corner_radius=18, border_width=0)
+        bubble.pack(side=align, padx=(8 if not is_me else 0, 0), anchor=anchor, pady=2)
+
+        if not is_me:
+            ctk.CTkLabel(bubble, text=sender, font=("Segoe UI", 9, "bold"), text_color="gray").pack(anchor="w", padx=12, pady=(5,0))
+        
+        ctk.CTkLabel(
+            bubble, 
+            text="🚫 Tin nhắn đã bị thu hồi",
+            font=("Segoe UI", 12, "italic"),
+            text_color=("gray", "#888")
+        ).pack(padx=15, pady=10)
+        
+        # Timestamp
+        if timestamp_str:
+            info_frame = ctk.CTkFrame(bubble, fg_color="transparent")
+            info_frame.pack(anchor="e", padx=10, pady=(0, 4))
+            try:
+                dt = datetime.datetime.strptime(timestamp_str.split('.')[0], "%Y-%m-%d %H:%M:%S")
+                ts = dt.strftime("%H:%M")
+            except: 
+                ts = timestamp_str
+            ctk.CTkLabel(info_frame, text=ts, font=("Segoe UI", 9), text_color="#999999").pack(side="left")
+        
+        # Store reference
+        if message_id:
+            self.message_widgets[message_id] = {
+                "bubble": bubble,
+                "reaction_frame": None,
+                "row": row
+            }
 
     def heartbeat_loop(self, sock, conn_id):
         """Gửi PING định kỳ"""

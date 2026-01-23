@@ -50,6 +50,11 @@ class DBHandler:
             conn.execute("ALTER TABLE messages ADD COLUMN receiver TEXT")
         except: pass
         
+        # Migration: Add deleted column if not exists
+        try:
+            conn.execute("ALTER TABLE messages ADD COLUMN deleted TEXT")
+        except: pass
+        
         # Bảng Groups
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS groups (
@@ -246,10 +251,11 @@ class DBHandler:
             cursor = conn.cursor()
             
             # Query messages where (sender=u1 AND receiver=u2) OR (sender=u2 AND receiver=u1)
+            # Trả về cả cột deleted để client biết tin nhắn nào đã bị xóa
             cursor.execute('''
-                SELECT id, sender, content, timestamp, msg_type, file_path 
+                SELECT id, sender, content, timestamp, msg_type, file_path, deleted 
                 FROM messages 
-                WHERE (sender=? AND receiver=?) OR (sender=? AND receiver=?)
+                WHERE ((sender=? AND receiver=?) OR (sender=? AND receiver=?))
                 ORDER BY id DESC LIMIT ?
             ''', (user1, user2, user2, user1, limit))
             
@@ -266,8 +272,9 @@ class DBHandler:
             cursor = conn.cursor()
             
             # Query messages where receiver=group_name
+            # Trả về cả cột deleted để client biết tin nhắn nào đã bị xóa
             cursor.execute('''
-                SELECT id, sender, content, timestamp, msg_type, file_path
+                SELECT id, sender, content, timestamp, msg_type, file_path, deleted
                 FROM messages
                 WHERE receiver=?
                 ORDER BY id DESC LIMIT ?
@@ -484,3 +491,75 @@ class DBHandler:
         except Exception as e:
             print(f"[DB] Lỗi get_message_reactions: {e}")
             return {}
+
+    # --- DELETE MESSAGE METHODS ---
+    def delete_message(self, message_id, username):
+        """Xóa/Thu hồi tin nhắn
+        Returns: (success: bool, message: str, timestamp: str|None)
+        """
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            cursor = conn.cursor()
+            
+            # Kiểm tra tin nhắn có tồn tại và thuộc về user không
+            cursor.execute('''
+                SELECT sender, timestamp, deleted FROM messages 
+                WHERE id=?
+            ''', (message_id,))
+            
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return False, "Tin nhắn không tồn tại", None
+            
+            sender, timestamp_str, deleted = row
+            
+            # Kiểm tra xem có phải người gửi không
+            if sender != username:
+                conn.close()
+                return False, "Bạn không có quyền xóa tin nhắn này", None
+            
+            # Kiểm tra đã bị xóa chưa
+            if deleted:
+                conn.close()
+                return False, "Tin nhắn đã bị thu hồi trước đó", None
+            
+            # Kiểm tra thời gian (5 phút = 300 giây)
+            try:
+                msg_time = datetime.datetime.strptime(timestamp_str.split('.')[0], "%Y-%m-%d %H:%M:%S")
+                now = datetime.datetime.now()
+                elapsed = (now - msg_time).total_seconds()
+                
+                if elapsed > 300:  # 5 phút
+                    conn.close()
+                    return False, "Chỉ có thể thu hồi tin nhắn trong vòng 5 phút", None
+            except Exception as e:
+                print(f"[DB] Lỗi parse timestamp: {e}")
+                conn.close()
+                return False, "Lỗi kiểm tra thời gian", None
+            
+            # Xóa tin nhắn (soft delete)
+            delete_time = str(datetime.datetime.now())
+            cursor.execute('''
+                UPDATE messages SET deleted=? WHERE id=?
+            ''', (delete_time, message_id))
+            
+            conn.commit()
+            conn.close()
+            return True, "Đã thu hồi tin nhắn", delete_time
+            
+        except Exception as e:
+            print(f"[DB] Lỗi delete_message: {e}")
+            return False, str(e), None
+    
+    def is_message_deleted(self, message_id):
+        """Kiểm tra tin nhắn đã bị xóa chưa"""
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30)
+            cursor = conn.cursor()
+            cursor.execute("SELECT deleted FROM messages WHERE id=?", (message_id,))
+            row = cursor.fetchone()
+            conn.close()
+            return row[0] is not None if row else False
+        except:
+            return False

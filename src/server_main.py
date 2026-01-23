@@ -150,13 +150,34 @@ class AsyncChatServer:
 
                     elif cmd == "LOGIN" and len(parts) == 4:
                         # AUTH|LOGIN|email|pass
+                        if writer in self.clients:
+                             print(f" [AUTH] Ignored duplicate LOGIN from writer={id(writer)} (User: {self.clients[writer]})")
+                             return
+
                         email, password = parts[2], parts[3]
+                        print(f" [DEBUG] Processing LOGIN for email={email} writer={id(writer)}")
                         
                         if self.db:
                             loop = asyncio.get_running_loop()
                             success, user_name_db = await loop.run_in_executor(None, self.db.check_login, email, password)
                             
                             if success:
+                                # CHECK DUPLICATE LOGIN
+                                existing_writer = None
+                                for w, u in list(self.clients.items()):
+                                    if u == user_name_db:
+                                        existing_writer = w
+                                        break
+                                
+                                if existing_writer:
+                                    print(f" [AUTH] {user_name_db} login from new device. Kicking old session.")
+                                    try:
+                                        existing_writer.write(Protocol.pack("FORCE_LOGOUT|Tài khoản nãy đã đăng nhập ở nơi khác."))
+                                        await existing_writer.drain()
+                                        existing_writer.close()
+                                    except: pass
+                                    self.remove_client(existing_writer)
+
                                 token = self.generate_token(email, user_name_db)
                                 username = user_name_db
                                 isAuthenticated = True
@@ -183,8 +204,9 @@ class AsyncChatServer:
 
             # --- SAU KHI LOGIN THÀNH CÔNG ---
             self.clients[writer] = username
+ 
             print(f" [LOGIN] {username} đã tham gia.")
-            print(f" [LOGIN] {username} đã tham gia.")
+
             await self.broadcast_user_list()
 
             # Gửi danh sách nhóm đã tham gia
@@ -201,8 +223,12 @@ class AsyncChatServer:
                 if not msg: break
                 
                 await self._process_command(msg, writer, username)
+        except ConnectionResetError:
+            print(f" [INFO] Client {username} disconnected (ConnectionReset).")
+        except asyncio.IncompleteReadError:
+            print(f" [INFO] Client {username} disconnected (IncompleteRead).")
         except Exception as e:
-            print(f" [ERR] Lỗi xử lý client {username}: {e}")
+            print(f" [ERR] Unexpected error with {username}: {e} (Type: {type(e).__name__})")
         finally:
             self.remove_client(writer)
 
@@ -220,16 +246,21 @@ class AsyncChatServer:
             await self._handle_history(writer, username, parts)
         elif cmd == "PING":
             # Heartbeat
-            # print(f" [HEARTBEAT] PING from {username}") 
+            print(f" [HEARTBEAT] PING from {username}") 
             writer.write(Protocol.pack("PONG"))
             await writer.drain()
         elif cmd.startswith("CMD_"):
              # User mgmt, typing, etc.
              await self._handle_other_cmds(writer, username, cmd, parts)
+
         elif cmd == "FILE":
              await self._handle_file(writer, username, parts)
         elif cmd == "REACTION":
              await self._handle_reaction(writer, username, parts)
+
+        elif cmd.startswith("FILE_"):
+             await self._handle_file_stream(writer, username, cmd, parts)
+
         else:
              print(f" [WARN] Unknown command from {username}: {msg}")
 
@@ -439,21 +470,51 @@ class AsyncChatServer:
                     writer.write(Protocol.pack("CMD_RES|GET_INFO|Error|Error|"))
                 await writer.drain()
 
-    async def _handle_file(self, writer, username, parts):
-        if len(parts) >= 3:
-            filename, b64_data = parts[1], parts[2]
-            if not os.path.exists("uploads"): os.makedirs("uploads")
-            file_path = f"uploads/{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{filename}"
-            loop = asyncio.get_running_loop()
-            success, error = await loop.run_in_executor(None, self.save_file_to_disk, file_path, b64_data)
-            if success:
-                print(f"📁 [{username}] Gửi file: {filename}")
-                if self.db:
-                     await loop.run_in_executor(None, self.db.save_message, username, filename, "file", file_path)
-                response = f"FILE|{username}|{filename}|{b64_data}"
-                await self.broadcast(response, exclude_writer=writer)
-            else:
-                print(f"[ERR] Save File Failed: {error}")
+    async def _handle_file_stream(self, writer, username, cmd, parts):
+        """
+        Xử lý truyền file theo luồng (Chunked Transfer)
+        Format:
+          FILE_START | target | filename | file_size | total_chunks
+          FILE_CHUNK | target | filename | chunk_index | data_b64
+          FILE_END   | target | filename
+        """
+        target = parts[1]
+        
+        # Chỉ lưu log/DB khi bắt đầu file
+        if cmd == "FILE_START":
+            filename = parts[2]
+            print(f"📁 [{username} -> {target}] Start sending file: {filename}")
+            if self.db:
+                 loop = asyncio.get_running_loop()
+                 # Lưu lịch sử là "Sent a file" thay vì lưu cả file (để tránh nặng DB)
+                 await loop.run_in_executor(None, self.db.save_message, username, target, f"[FILE] {filename}", "file_start", None)
+        
+        # Forward tin nhắn tới người nhận
+        encoded_msg = Protocol.pack(f"{cmd}|{username}|{'|'.join(parts[1:])}")
+        
+        if target == "General":
+            await self.broadcast(f"{cmd}|{username}|{'|'.join(parts[1:])}", exclude_writer=writer)
+        else:
+             # Private or Group
+             # Logic tìm user để forward (giống _handle_msg) nhưng tối ưu hơn
+             if target in self.client_emails.values(): # Check if target is a user (simplistic check)
+                 pass 
+             
+             # Broadcast Group (nếu target là group) hoặc Send Private
+             # Để đơn giản, ta dùng logic broadcast của Group nếu target không phải user private
+             
+             # Case 1: Private
+             sent = False
+             for w, u in self.clients.items():
+                 if u == target:
+                     w.write(encoded_msg)
+                     await w.drain()
+                     sent = True
+                     break
+            
+             # Case 2: Group (Nếu không phải private user)
+             if not sent:
+                await self.broadcast_group(target, f"{cmd}|{username}|{'|'.join(parts[1:])}", exclude_writer=writer)
 
     async def _handle_reaction(self, writer, username, parts):
         """Xử lý REACTION|ADD|message_id|emoji hoặc REACTION|REMOVE|message_id|emoji"""

@@ -44,7 +44,13 @@ class LoginWindow(ctk.CTkFrame):
         self.left_frame = ctk.CTkFrame(self, width=400, corner_radius=0, fg_color="#0068ff")
         self.left_frame.pack(side="left", fill="both")
         
-        ctk.CTkLabel(self.left_frame, text="💬", font=("Segoe UI Emoji", 80), text_color="white").place(relx=0.5, rely=0.35, anchor="center")
+        # Logo
+        try:
+            icon_path = os.path.join(self.assets_dir, "icons/chat.png")
+            img = ctk.CTkImage(Image.open(icon_path), size=(100, 100))
+            ctk.CTkLabel(self.left_frame, text="", image=img).place(relx=0.5, rely=0.35, anchor="center")
+        except:
+            ctk.CTkLabel(self.left_frame, text="💬", font=("Segoe UI Emoji", 80), text_color="white").place(relx=0.5, rely=0.35, anchor="center")
         ctk.CTkLabel(self.left_frame, text="ChatApp", font=("Segoe UI", 36, "bold"), text_color="white").place(relx=0.5, rely=0.5, anchor="center")
         ctk.CTkLabel(self.left_frame, text="An toàn & Bảo mật", font=("Segoe UI", 14), text_color="#dceeff").place(relx=0.5, rely=0.58, anchor="center")
 

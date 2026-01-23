@@ -9,6 +9,7 @@ import base64
 from PIL import Image
 import io
 import ssl
+import time
 
 # Thêm đường dẫn để import core.protocol nếu chạy trực tiếp
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,16 +23,32 @@ except ImportError:
     from core.protocol import Protocol
 
 # --- CẤU HÌNH MÀU SẮC  ---
-# --- CẤU HÌNH MÀU SẮC (MODERN) ---
-ZALO_BLUE = "#0084FF" # Messenger Blue
-ZALO_BG_LIGHT = "#F0F2F5"
-ZALO_BUBBLE_ME = "#0084FF" # Blue for me
-ZALO_BUBBLE_YOU = "#3a3b3c" # Gray for others
-TEXT_COLOR_ME = "white"
-TEXT_COLOR_YOU = "white"
+# --- CẤU HÌNH MÀU SẮC (MODERN ZALO STYLE) ---
+# Format: (Light_Mode_Color, Dark_Mode_Color)
+COLOR_NAV_BG = ("#F0F2F5", "#111111")       # Thanh điều hướng trái
+COLOR_SIDEBAR_BG = ("#FFFFFF", "#18191A")   # Danh sách chat
+COLOR_MAIN_BG = ("#E8EAED", "#0C0D0E")      # Màn hình chat chính (Zalo thường hơi xám ở nền, tối đen ở dark)
+COLOR_HEADER_BG = ("#FFFFFF", "#18191A")    # Thanh tiêu đề
+COLOR_INPUT_BG = ("#FFFFFF", "#1F2225")     # Ô nhập liệu
 
-ctk.set_appearance_mode("Light")
+# Message Bubbles
+BUBBLE_ME = ("#E3F2FD", "#005AE0")          # Mình: Xanh nhạt / Xanh đậm
+BUBBLE_YOU = ("#FFFFFF", "#262829")         # Bạn: Trắng / Xám đậm
+TEXT_ME = ("#000000", "#FFFFFF")
+TEXT_YOU = ("#000000", "#FFFFFF")
+
+ZALO_BLUE = "#0084FF"
+
+ctk.set_appearance_mode("System") # Auto follow OS or default
 ctk.set_default_color_theme("blue")
+
+def load_icon(name, size):
+    try:
+        path = os.path.join(os.path.dirname(__file__), "../../assets/icons", name)
+        img = Image.open(path)
+        return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
+    except:
+        return None
 
 # --- TOOLTIP CLASS ---
 class ToolTip:
@@ -89,6 +106,7 @@ class ChatAppClient(ctk.CTkFrame):
         self.server_host = host
         self.server_port = port
         self.client_socket = existing_socket
+        self.conn_id = 0
         self.is_running = True
         self.connect_state = "CONNECTED" # CONNECTED, RECONNECTING
         self.current_tab = "MSG"
@@ -99,6 +117,8 @@ class ChatAppClient(ctk.CTkFrame):
         self.user_list_data = [] # Store list of online users
         self.group_list_data = [] # Store list of joined groups
         self.unread_counts = {} # Store unread messages count per group {group_name: int}
+        self.active_downloads = {}
+        if not os.path.exists("downloads"): os.makedirs("downloads")
         self.msg_status_queues = {} # {receiver_name: [label1, label2, ...]}
         
         # --- REACTION STATE ---
@@ -126,15 +146,42 @@ class ChatAppClient(ctk.CTkFrame):
         if self.connect_state == "RECONNECTING":
             # Nếu chưa connect được, báo UI đang đợi
             self.after(0, self._ui_on_disconnect)
-            threading.Thread(target=self.reconnect_loop, daemon=True).start()
+            self.after(0, self._ui_on_disconnect)
+            threading.Thread(target=self.reconnect_loop, daemon=True, name="ReconnectThread").start()
         else:
             # Thread nhận tin
-            self.recv_thread = threading.Thread(target=self.receive_loop, daemon=True)
+            # Thread nhận tin
+            self.recv_thread = threading.Thread(target=self.receive_loop, daemon=True, name=f"RecvThread-{self.conn_id}")
             self.recv_thread.start()
 
             # Thread Heartbeat (Ping)
-            self.heartbeat_thread = threading.Thread(target=self.heartbeat_loop, daemon=True)
+            self.heartbeat_thread = threading.Thread(target=self.heartbeat_loop, args=(self.client_socket, self.conn_id), daemon=True, name=f"HeartbeatThread-{self.conn_id}")
             self.heartbeat_thread.start()
+
+    def quit_app(self, event=None, force_quit=False):
+        try:
+            if not force_quit and messagebox.askokcancel("Thoát", "Bạn có chắc chắn muốn thoát?"):
+                self.is_running = False
+                if self.client_socket:
+                    try: self.client_socket.close()
+                    except: pass
+                
+                # Logout Call
+                if self.on_logout_callback: 
+                    self.on_logout_callback()
+                
+                self.destroy()
+                
+            elif force_quit:
+                self.is_running = False
+                if self.client_socket:
+                    try: self.client_socket.close()
+                    except: pass
+                self.destroy() 
+                if self.on_logout_callback: 
+                    self.on_logout_callback()
+
+        except: self.destroy()
 
     def connect_server(self):
         # Nếu đã có socket (từ Login truyền sang) thì dùng luôn
@@ -161,6 +208,7 @@ class ChatAppClient(ctk.CTkFrame):
                 # Check response synchronously
                 resp = Protocol.recv_msg_sync(self.client_socket)
                 if resp and resp.startswith("AUTH|SUCCESS"):
+                    self.conn_id += 1
                     return True
                 else:
                      return False
@@ -175,6 +223,7 @@ class ChatAppClient(ctk.CTkFrame):
             return False
 
     def handle_disconnect(self):
+        if not self.is_running: return # Do not reconnect if closing
         if self.connect_state == "RECONNECTING": return
         self.connect_state = "RECONNECTING"
         print("[CLIENT] Lost connection. Reconnecting...")
@@ -182,17 +231,24 @@ class ChatAppClient(ctk.CTkFrame):
         # UI Update (Thread Safe)
         self.after(0, self._ui_on_disconnect)
         
+        if self.client_socket:
+             try: self.client_socket.close()
+             except: pass
         self.client_socket = None
         
         # Start Reconnect Thread
-        threading.Thread(target=self.reconnect_loop, daemon=True).start()
+        threading.Thread(target=self.reconnect_loop, daemon=True, name="ReconnectThread").start()
     
     def _ui_on_disconnect(self):
         try:
+            if not self.winfo_exists(): return
             now = datetime.datetime.now().strftime("%H:%M:%S")
-            self.lbl_chat_name.configure(text=f"🔄 Waiting for server... [{now}]")
-            self.entry_msg.configure(state="disabled")
-            self.btn_send.configure(state="disabled")
+            try: self.lbl_chat_name.configure(text=f"🔄 Waiting for server... [{now}]")
+            except: pass
+            try: self.entry_msg.configure(state="disabled")
+            except: pass
+            try: self.btn_send.configure(state="disabled")
+            except: pass
         except Exception as e:
             print(f"Error updating UI on disconnect: {e}")
 
@@ -209,8 +265,13 @@ class ChatAppClient(ctk.CTkFrame):
                 self.after(0, self._ui_on_reconnect)
                 
                 # Re-start threads
-                self.recv_thread = threading.Thread(target=self.receive_loop, daemon=True)
+                # Re-start threads
+                # Re-start threads
+                self.recv_thread = threading.Thread(target=self.receive_loop, daemon=True, name=f"RecvThread-{self.conn_id}")
                 self.recv_thread.start()
+                
+                self.heartbeat_thread = threading.Thread(target=self.heartbeat_loop, args=(self.client_socket, self.conn_id), daemon=True, name=f"HeartbeatThread-{self.conn_id}")
+                self.heartbeat_thread.start()
                 
                 if not self.heartbeat_thread or not self.heartbeat_thread.is_alive():
                      self.heartbeat_thread = threading.Thread(target=self.heartbeat_loop, daemon=True)
@@ -232,36 +293,36 @@ class ChatAppClient(ctk.CTkFrame):
     # 1. NAV BAR (CỘT TRÁI CÙNG)
     # =========================================================================
     def build_nav_bar(self):
-        # Đổi fg_color thành adaptive color (Light, Dark)
-        self.nav_frame = ctk.CTkFrame(self, width=70, corner_radius=0, fg_color=("#0084FF", "#262626"))
+        self.nav_frame = ctk.CTkFrame(self, width=70, corner_radius=0, fg_color=COLOR_NAV_BG)
         self.nav_frame.grid(row=0, column=0, sticky="nsew")
         self.nav_frame.grid_propagate(False)
 
         # Avatar
         btn_avatar = ctk.CTkButton(self.nav_frame, text=self.username[0].upper(), width=45, height=45, corner_radius=22,
-                      fg_color=("#1a8cff", "#3a3b3c"), hover_color=("white", "#4e4f50"), text_color="white", font=("Arial", 18, "bold"),
+                      fg_color=ZALO_BLUE, text_color="white", font=("Arial", 18, "bold"),
                       command=self.open_profile_modal)
         btn_avatar.pack(pady=(30, 20))
         ToolTip(btn_avatar, "Hồ sơ của bạn")
 
         # Tabs
-        self.btn_nav_msg = self.create_nav_btn("💬", True, lambda: self.switch_tab("MSG"), "Tin nhắn")
-        self.btn_nav_contact = self.create_nav_btn("📇", False, lambda: self.switch_tab("CONTACT"), "Danh bạ")
-        # self.btn_nav_todo = self.create_nav_btn("✅", False, lambda: self.switch_tab("TODO"), "Việc cần làm")
+        self.btn_nav_msg = self.create_nav_btn("chat.png", True, lambda: self.switch_tab("MSG"), "Tin nhắn")
+        # self.btn_nav_contact = self.create_nav_btn("group.png", False, lambda: self.switch_tab("CONTACT"), "Danh bạ")
         
         # Settings
-        btn_settings = ctk.CTkButton(self.nav_frame, text="⚙️", width=40, height=40, fg_color="transparent",
-                      hover_color=("#1a8cff", "#3a3b3c"), font=("Segoe UI Emoji", 22),
-                      command=self.open_settings_modal)
+        icon_settings = load_icon("settings.png", 24)
+        btn_settings = ctk.CTkButton(self.nav_frame, text="", image=icon_settings, width=40, height=40, fg_color="transparent",
+                      hover_color="#E4E6EB", command=self.open_settings_modal)
         btn_settings.pack(side="bottom", pady=20)
         ToolTip(btn_settings, "Cài đặt")
 
-    def create_nav_btn(self, icon, is_active, command, tooltip=""):
-        active_color = ("#1a8cff", "#3a3b3c")
-        color = active_color if is_active else "transparent"
-        btn = ctk.CTkButton(self.nav_frame, text=icon, width=45, height=45, corner_radius=12,
-                            fg_color=color, hover_color=active_color, font=("Segoe UI Emoji", 22),
-                            command=command)
+    def create_nav_btn(self, icon_name, is_active, command, tooltip=""):
+        icon = load_icon(icon_name, 28)
+        # Active: Blue tint in light, dark tint in dark
+        color = ("#D8E4FF", "#3A3B3C") if is_active else "transparent"
+        hover = ("#E4E6EB", "#3A3B3C")
+        
+        btn = ctk.CTkButton(self.nav_frame, text="", image=icon, width=45, height=45, corner_radius=10,
+                            fg_color=color, hover_color=hover, command=command)
         btn.pack(pady=8)
         if tooltip: ToolTip(btn, tooltip)
         return btn
@@ -291,7 +352,7 @@ class ChatAppClient(ctk.CTkFrame):
     # =========================================================================
     # =========================================================================
     def build_sidebar(self):
-        self.side_frame = ctk.CTkFrame(self, width=320, corner_radius=0, fg_color=("white", "#2b2b2b"))
+        self.side_frame = ctk.CTkFrame(self, width=320, corner_radius=0, fg_color=COLOR_SIDEBAR_BG)
         self.side_frame.grid(row=0, column=1, sticky="nsew")
         self.side_frame.grid_propagate(False)
         self.side_frame.grid_rowconfigure(2, weight=1)
@@ -303,19 +364,19 @@ class ChatAppClient(ctk.CTkFrame):
         self.lbl_sidebar_title = ctk.CTkLabel(header_side, text="Tìm kiếm", font=("Segoe UI", 14, "bold"), text_color=("gray", "lightgray"))
         self.lbl_sidebar_title.pack(side="left", padx=15, pady=15)
         
-        btn_add = ctk.CTkButton(header_side, text="➕", width=30, height=30, fg_color="transparent", text_color=("black", "white"), 
-                      hover_color=("gray90", "gray40"), font=("Arial", 16), command=self.add_new_action)
+        btn_add = ctk.CTkButton(header_side, text="", image=load_icon("add.png", 20), width=35, height=35, fg_color="transparent", 
+                      hover_color="#E4E6EB", command=self.add_new_action)
         btn_add.pack(side="right", padx=5)
         ToolTip(btn_add, "Tạo nhóm mới")
 
-        btn_join = ctk.CTkButton(header_side, text="🔗", width=30, height=30, fg_color="transparent", text_color=("black", "white"), 
-                      hover_color=("gray90", "gray40"), font=("Arial", 16), command=self.join_group_action)
+        btn_join = ctk.CTkButton(header_side, text="", image=load_icon("group.png", 22), width=35, height=35, fg_color="transparent",
+                      hover_color="#E4E6EB", command=self.join_group_action)
         btn_join.pack(side="right", padx=5)
         ToolTip(btn_join, "Tham gia nhóm")
 
         # Search box
         self.entry_search = ctk.CTkEntry(self.side_frame, placeholder_text="Tìm kiếm...", height=35, 
-                                         fg_color=("#eaedf0", "#3a3b3c"), border_width=0, text_color=("black", "white"))
+                                         fg_color=("#EAEDF0", "#262829"), border_width=0, text_color=("black", "white"), placeholder_text_color="gray")
         self.entry_search.grid(row=1, column=0, padx=15, pady=(0, 15), sticky="ew")
 
         # List Content
@@ -326,15 +387,13 @@ class ChatAppClient(ctk.CTkFrame):
     # 3. MAIN CHAT (CỘT PHẢI)
     # =========================================================================
     def build_main_chat(self):
-
-        self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color=(ZALO_BG_LIGHT, "#1e1e1e"))
+        self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color=COLOR_MAIN_BG)
         self.main_frame.grid(row=0, column=2, sticky="nsew")
         self.main_frame.grid_rowconfigure(1, weight=1)
         self.main_frame.grid_columnconfigure(0, weight=1)
 
         # --- Header ---
-        # --- Header ---
-        self.header = ctk.CTkFrame(self.main_frame, height=68, corner_radius=0, fg_color=("white", "#2b2b2b"))
+        self.header = ctk.CTkFrame(self.main_frame, height=68, corner_radius=0, fg_color=COLOR_HEADER_BG)
         self.header.grid(row=0, column=0, sticky="ew")
         
         ctk.CTkButton(self.header, text="👥", width=45, height=45, corner_radius=22, fg_color="#e5efff", 
@@ -347,49 +406,48 @@ class ChatAppClient(ctk.CTkFrame):
         ctk.CTkLabel(info, text="Trực tuyến", font=("Segoe UI", 11), text_color="green").pack(anchor="w")
         
         # Icons Header (Video Call, Search)
-        btn_video = ctk.CTkButton(self.header, text="📹", width=40, height=40, fg_color="transparent", text_color="#555", 
-                      hover_color="#f0f0f0", font=("Segoe UI Emoji", 20), command=self.dummy_video_call)
-        btn_video.pack(side="right", padx=15)
-        ToolTip(btn_video, "Gọi Video (Giả lập)")
+        btn_video = ctk.CTkButton(self.header, text="", image=load_icon("video.png", 24), width=40, height=40, fg_color="transparent", 
+                      hover_color="#F0F2F5", command=self.dummy_video_call)
+        btn_video.pack(side="right", padx=5)
+        ToolTip(btn_video, "Gọi Video")
         
-        btn_search_msg = ctk.CTkButton(self.header, text="🔍", width=40, height=40, fg_color="transparent", text_color="#555", 
-                      hover_color="#f0f0f0", font=("Segoe UI Emoji", 20), command=lambda: messagebox.showinfo("Info", "Tìm tin nhắn cũ"))
-        btn_search_msg.pack(side="right")
-        ToolTip(btn_video, "Gọi Video (Giả lập)")
+        btn_search_msg = ctk.CTkButton(self.header, text="", image=load_icon("search.png", 24), width=40, height=40, fg_color="transparent",
+                      hover_color="#F0F2F5", command=lambda: messagebox.showinfo("Info", "Tìm tin nhắn cũ"))
+        btn_search_msg.pack(side="right", padx=5)
 
-        # Group Action Buttons (Hidden by default)
-        self.btn_leave_group = ctk.CTkButton(self.header, text="🏃", width=40, height=40, fg_color="transparent", text_color="red",
-                                           hover_color="#ffe6e6", font=("Segoe UI Emoji", 20), command=self.leave_group_action)
-        self.btn_delete_group = ctk.CTkButton(self.header, text="🗑️", width=40, height=40, fg_color="transparent", text_color="red",
-                                            hover_color="#ffe6e6", font=("Segoe UI Emoji", 20), command=self.delete_group_action)
+        # Group Action Buttons
+        self.btn_leave_group = ctk.CTkButton(self.header, text="", image=load_icon("leave.png", 24), width=40, height=40, fg_color="transparent",
+                                           hover_color="#ffe6e6", command=self.leave_group_action)
+        self.btn_delete_group = ctk.CTkButton(self.header, text="", image=load_icon("delete.png", 24), width=40, height=40, fg_color="transparent",
+                                            hover_color="#ffe6e6", command=self.delete_group_action)
 
         # --- Chat Area ---
         # --- Chat Area ---
-        self.msg_area = ctk.CTkScrollableFrame(self.main_frame, fg_color=(ZALO_BG_LIGHT, "#1e1e1e"))
+        self.msg_area = ctk.CTkScrollableFrame(self.main_frame, fg_color=COLOR_MAIN_BG)
         self.msg_area.grid(row=1, column=0, sticky="nsew")
 
         # --- Input Area ---
         # --- Input Area ---
         # --- Input Area (Floating Style) ---
         self.input_container = ctk.CTkFrame(self.main_frame, height=80, fg_color="transparent")
-        self.input_container.grid(row=2, column=0, sticky="ew", padx=20, pady=10)
+        self.input_container.grid(row=2, column=0, sticky="ew", padx=20, pady=20)
         
-        # Typing Indicator (Moved here)
+        # Typing Indicator
         self.lbl_typing = ctk.CTkLabel(self.input_container, text="", font=("Segoe UI", 11, "bold"), text_color="#0084FF")
-        self.lbl_typing.pack(anchor="w", padx=10, pady=(0,2))
+        self.lbl_typing.pack(anchor="w", padx=15, pady=(0,2))
         
-        # Inner styling frame
-        self.input_bg = ctk.CTkFrame(self.input_container, fg_color=("white", "#2b2b2b"), corner_radius=25, border_width=1, border_color=("#ddd", "#444"))
+        # Inner styling frame (Rounded)
+        self.input_bg = ctk.CTkFrame(self.input_container, fg_color=COLOR_INPUT_BG, corner_radius=25, border_width=1, border_color=("#E4E6EB", "#333"))
         self.input_bg.pack(fill="both", expand=True)
 
         # Attachment Button
-        btn_attach = ctk.CTkButton(self.input_bg, text="📎", width=40, height=40, fg_color="transparent", text_color="#555", 
-                                   hover_color="#f0f0f0", font=("Segoe UI Emoji", 20), corner_radius=20, command=self.send_file_action)
+        btn_attach = ctk.CTkButton(self.input_bg, text="", image=load_icon("attach.png", 22), width=40, height=40, fg_color="transparent",
+                                   hover_color=("#F0F2F5", "#333"), corner_radius=20, command=self.send_file_action)
         btn_attach.pack(side="left", padx=5, pady=5)
         
         # Text Entry
         self.entry_msg = ctk.CTkEntry(self.input_bg, placeholder_text="Nhập tin nhắn...", height=40, 
-                                      border_width=0, fg_color="transparent", font=("Segoe UI", 14), text_color=("black", "white"))
+                                      border_width=0, fg_color="transparent", font=("Segoe UI", 14), text_color=("black", "white"), placeholder_text_color="gray")
         self.entry_msg.pack(side="left", fill="x", expand=True, padx=5)
         self.entry_msg.bind("<Return>", self.send_msg)
         
@@ -397,28 +455,23 @@ class ChatAppClient(ctk.CTkFrame):
         self.last_typing_time = 0
         def validate_input(event=None):
             text = self.entry_msg.get().strip()
-            if not text:
-                self.btn_send.configure(state="disabled", fg_color="gray", text_color="#ccc")
-            else:
-                self.btn_send.configure(state="normal", fg_color="transparent", text_color=ZALO_BLUE)
-            
             # Send Typing Signal (Debounced 2s)
             import time
             now = time.time()
-            if now - self.last_typing_time > 2.0:
+            if now - self.last_typing_time > 2.0 and text:
                 self.last_typing_time = now
                 threading.Thread(target=self.send_typing_signal).start()
         
         self.entry_msg.bind("<KeyRelease>", validate_input)
 
         # Emoji Button
-        btn_emoji = ctk.CTkButton(self.input_bg, text="😀", width=40, height=40, fg_color="transparent", text_color="#555", 
-                                   hover_color="#f0f0f0", font=("Segoe UI Emoji", 20), corner_radius=20, command=self.dummy_sticker)
+        btn_emoji = ctk.CTkButton(self.input_bg, text="", image=load_icon("emoji.png", 22), width=40, height=40, fg_color="transparent",
+                                   hover_color=("#F0F2F5", "#333"), corner_radius=20, command=self.dummy_sticker)
         btn_emoji.pack(side="right", padx=5)
 
         # Send Button
-        self.btn_send = ctk.CTkButton(self.input_bg, text="➤", width=45, height=40, fg_color="transparent", 
-                                 text_color=ZALO_BLUE, font=("Segoe UI Emoji", 22), hover_color="#e6f2ff", corner_radius=20, command=self.send_msg)
+        self.btn_send = ctk.CTkButton(self.input_bg, text="", image=load_icon("send.png", 20), width=45, height=40, fg_color="transparent", 
+                                 hover_color=("#E3F2FD", "#333"), corner_radius=20, command=self.send_msg)
         self.btn_send.pack(side="right", padx=(0,5))
         
         # Init State
@@ -527,7 +580,7 @@ class ChatAppClient(ctk.CTkFrame):
 
         # Nút đăng xuất
         ctk.CTkButton(sys_inner, text="Đăng xuất khỏi thiết bị", fg_color="#ff4d4d", hover_color="#cc0000", 
-                      text_color="white", command=self.on_close, height=40).pack(fill="x")
+                      text_color="white", command=self.quit_app, height=40).pack(fill="x")
 
     def _create_section_header(self, text):
         """Hàm hỗ trợ tạo tiêu đề nhỏ cho từng phần"""
@@ -824,7 +877,7 @@ class ChatAppClient(ctk.CTkFrame):
             for g in self.group_list_data:
                 # Active style
                 is_selected = (self.chat_mode == "GROUP" and self.target_name == g)
-                bg_color = ("#e5efff", "#3a3b3c") if is_selected else "transparent"
+                bg_color = ("#e5efff", "#262829") if is_selected else "transparent"
                 
                 frame = ctk.CTkFrame(self.user_scroll, fg_color=bg_color, corner_radius=6)
                 frame.pack(fill="x", pady=2, padx=5)
@@ -833,7 +886,7 @@ class ChatAppClient(ctk.CTkFrame):
                 frame.bind("<Button-1>", lambda e, name=g: self.select_chat_target("GROUP", name))
                 
                 btn_icon = ctk.CTkButton(frame, text="🛡️", width=35, height=35, corner_radius=10, 
-                              fg_color="#ffecd1", text_color="#d97706", hover=False)
+                              fg_color=("#ffecd1", "#4A3B2A"), text_color="#d97706", hover=False)
                 btn_icon.pack(side="left", padx=10, pady=5)
                 btn_icon.bind("<Button-1>", lambda e, name=g: self.select_chat_target("GROUP", name))
 
@@ -858,14 +911,14 @@ class ChatAppClient(ctk.CTkFrame):
             is_active = (self.chat_mode == "PRIVATE" and self.target_name == u)
             
             # Background Color for Row
-            bg_color = ("#e5efff", "#333333") if is_active else ("white", "#2b2b2b")
+            bg_color = ("#e5efff", "#262829") if is_active else "transparent"
             
             # Hover effect frame
             inner_frame = ctk.CTkFrame(frame, fg_color=bg_color, corner_radius=10)
             inner_frame.pack(fill="x")
             
             # Avatar (Create & Pack First)
-            avatar_color = ZALO_BLUE if u == self.username else ("#e6e8eb", "#3a3b3c")
+            avatar_color = ZALO_BLUE if u == self.username else ("#e6e8eb", "#333")
             avatar_txt = "white" if u == self.username else ("#333", "white")
             
             # Determine command based on user
@@ -940,14 +993,57 @@ class ChatAppClient(ctk.CTkFrame):
         # Refresh Sidebar UI (Refresh highlight)
         self.update_user_list_ui()
 
-    def add_message_bubble(self, sender, content, is_me, msg_type="text", file_data=None, timestamp_str=None, message_id=None):
+    def add_file_bubble(self, sender, filename, full_path):
+        is_me = (sender == "Me" or sender == self.username)
         if is_me:
-            bg, align, anchor = ZALO_BUBBLE_ME, "right", "e"
-            txt_col = TEXT_COLOR_ME
-            sub_col = "#E8E8E8" # Lighter text for timestamp etc on blue bg
+            bg, align, anchor = BUBBLE_ME, "right", "e"
+            txt_col = TEXT_ME
         else:
-            bg, align, anchor = ZALO_BUBBLE_YOU, "left", "w"
-            txt_col = TEXT_COLOR_YOU
+            bg, align, anchor = BUBBLE_YOU, "left", "w"
+            txt_col = TEXT_YOU
+
+        row = ctk.CTkFrame(self.msg_area, fg_color="transparent")
+        row.pack(fill="x", pady=5, padx=20)
+
+        if not is_me:
+            ctk.CTkButton(row, text=sender[0], width=28, height=28, corner_radius=14, 
+                          fg_color=("#e6e8eb", "#333"), text_color="#555", hover=False).pack(side="left", anchor="s", pady=(0,5))
+
+        bubble = ctk.CTkFrame(row, fg_color=bg, corner_radius=18, border_width=1, border_color=("#E4E6EB", "#333"))
+        bubble.pack(side=align, anchor=anchor)
+
+        # File Icon + Name
+        icon_frame = ctk.CTkFrame(bubble, fg_color="transparent")
+        icon_frame.pack(padx=10, pady=5)
+        
+        ctk.CTkLabel(icon_frame, text="📄", font=("Segoe UI Emoji", 24)).pack(side="left", padx=5)
+        
+        info_frame = ctk.CTkFrame(icon_frame, fg_color="transparent")
+        info_frame.pack(side="left")
+        
+        ctk.CTkLabel(info_frame, text=filename, font=("Segoe UI", 12, "bold"), text_color=txt_col).pack(anchor="w")
+        ctk.CTkLabel(info_frame, text="Đã lưu vào máy", font=("Segoe UI", 10), text_color="gray").pack(anchor="w")
+        
+        # Open Folder Button
+        def open_folder():
+             import subprocess
+             try:
+                subprocess.Popen(f'explorer /select,"{full_path}"')
+             except:
+                os.startfile(os.path.dirname(full_path))
+
+        ctk.CTkButton(bubble, text="Mở thư mục", width=80, height=24, fg_color=("white", "#444"), text_color=txt_col,
+                      command=open_folder).pack(padx=10, pady=(0,10))
+
+    def add_message_bubble(self, sender, content, is_me, msg_type="text", file_data=None, timestamp_str=None, message_id=None):
+
+        if is_me:
+            bg, align, anchor = BUBBLE_ME, "right", "e"
+            txt_col = TEXT_ME
+            sub_col = ("gray", "#CCCCCC")
+        else:
+            bg, align, anchor = BUBBLE_YOU, "left", "w"
+            txt_col = TEXT_YOU
             sub_col = "gray"
 
         row = ctk.CTkFrame(self.msg_area, fg_color="transparent")
@@ -956,7 +1052,7 @@ class ChatAppClient(ctk.CTkFrame):
         if not is_me:
             # Avatar small
             ctk.CTkButton(row, text=sender[0], width=28, height=28, corner_radius=14, 
-                          fg_color="#e6e8eb", text_color="#555", hover=False, font=("Arial", 10, "bold")).pack(side="left", anchor="s", pady=(0,5))
+                          fg_color=("#e6e8eb", "#333"), text_color="#555", hover=False, font=("Arial", 10, "bold")).pack(side="left", anchor="s", pady=(0,5))
 
         # Bubble
         bubble = ctk.CTkFrame(row, fg_color=bg, corner_radius=18, border_width=0) # Rounder corners, no border
@@ -1118,6 +1214,65 @@ class ChatAppClient(ctk.CTkFrame):
         try:
              self.msg_area._parent_canvas.yview_moveto(1.0)
         except: pass
+
+    # =========================================================================
+    # 5. FILE TRANSFER (CHUNKED)
+    # =========================================================================
+    def send_file_action(self):
+        file_path = filedialog.askopenfilename()
+        if not file_path: return
+        
+        # Run in thread
+        threading.Thread(target=self._send_file_task, args=(file_path,), daemon=True).start()
+
+    def _send_file_task(self, file_path):
+        import math
+        try:
+            filename = os.path.basename(file_path)
+            file_size = os.path.getsize(file_path)
+            chunk_size = 32 * 1024 # 32KB chunks
+            
+            total_chunks = math.ceil(file_size / chunk_size)
+            target = "General"
+            if self.chat_mode == "PRIVATE": target = self.target_name
+            elif self.chat_mode == "GROUP": target = self.target_name
+
+            # 1. Send FILE_START
+            # FILE_START | sender | target | filename | file_size | total_chunks
+            # Note: Server forwards cmd|sender|... so we just send parts
+            # Protocol.pack wraps content.
+            # Client sends: FILE_START|target|filename|size|chunks
+            cmd_start = f"FILE_START|{target}|{filename}|{file_size}|{total_chunks}"
+            self.client_socket.sendall(Protocol.pack(cmd_start))
+            
+            # 2. Send Chunks
+            with open(file_path, "rb") as f:
+                chunk_index = 0
+                while True:
+                    data = f.read(chunk_size)
+                    if not data: break
+                    
+                    b64_data = base64.b64encode(data).decode('utf-8')
+                    # FILE_CHUNK | target | filename | chunk_index | data_b64
+                    cmd_chunk = f"FILE_CHUNK|{target}|{filename}|{chunk_index}|{b64_data}"
+                    self.client_socket.sendall(Protocol.pack(cmd_chunk))
+                    
+                    chunk_index += 1
+                    # Small sleep to prevent flooding network
+                    time.sleep(0.005) 
+            
+            # 3. Send FILE_END
+            cmd_end = f"FILE_END|{target}|{filename}"
+            self.client_socket.sendall(Protocol.pack(cmd_end))
+            
+            # Update UI (Local)
+            # Update UI (Local)
+            # Or use add_file_bubble directly if we want
+            self.after(0, lambda: self.add_file_bubble("Me", filename, file_path))
+            
+        except Exception as e:
+            print(f"Send File Error: {e}")
+            messagebox.showerror("Error", f"Gửi file thất bại: {e}")
 
     def save_file_local(self, filename, b64_data):
         try:
@@ -1311,11 +1466,89 @@ class ChatAppClient(ctk.CTkFrame):
                             self.unread_counts[g_name] = self.unread_counts.get(g_name, 0) + 1
                             self.after(0, self.update_user_list_ui)
 
-                elif cmd == "FILE":
-                    # FILE|sender|filename|b64
-                    sender, filename, b64 = parts[1], parts[2], parts[3]
-                    if sender != self.username:
-                        self.after(0, lambda s=sender, f=filename, b=b64: self.add_message_bubble(s, f, is_me=False, msg_type="file", file_data=b))
+                elif cmd == "FILE_START":
+                    try:
+                        # FILE_START | sender | target | filename | file_size | total_chunks
+                        sender, target_grp, filename = parts[1], parts[2], parts[3]
+                        
+                        unique_name = f"{sender}_{int(time.time())}_{filename}"
+                        save_path = os.path.join("downloads", unique_name)
+                        
+                        f = open(save_path, "wb")
+                        self.active_downloads[unique_name] = f
+                        print(f"[FILE] Started receiving {unique_name}")
+                        
+                        # Show debug if needed (optional)
+                        # self.after(0, lambda: self.add_system_message(f"DEBUG: Start receiving {filename} from {sender}"))
+                        
+                    except Exception as e:
+                        print(f"[FILE] Error creating file: {e}")
+                        self.after(0, lambda e=e: self.add_system_message(f"Error starting file: {e}"))
+
+                elif cmd == "FILE_CHUNK":
+                    # FILE_CHUNK | sender | target | filename | chunk_index | data_b64
+                    try:
+                        # Reconstruct unique key? 
+                        # Problem: Stateless protocol implies we need unique ID in packet.
+                        # Existing packet: sender|target|filename. 
+                        # Assumption: Only one file per sender-filename pair active at once.
+                        # To be robust, we'd need a file-id. 
+                        # Workaround: Search active_downloads for matching sender/filename suffix?
+                        # Or just rely on strict ordering if we had used file_id.
+                        
+                        # Let's check how we sent it in server: 
+                        # Server forwards: cmd|username|part1|part2...
+                        # So Client Recv: FILE_CHUNK|sender|target|filename|chunk_index|data_b64
+                        
+                        sender, target_grp, filename, chunk_idx, b64_data = parts[1], parts[2], parts[3], parts[4], parts[5]
+                        
+                        # Find the active handle
+                        # Heuristic: Try to match file handle that corresponds to this transfer
+                        # Since we don't have ID in this simplified refactor, we iterate active_downloads
+                        # and match suffix. 
+                        # THIS IS RISKY if 2 files same name sent same time. But acceptable for MVP.
+                        
+                        current_handle_key = None
+                        for key in self.active_downloads.keys():
+                            if key.endswith(f"_{filename}") and key.startswith(f"{sender}_"):
+                                current_handle_key = key
+                                break
+                        
+                        if current_handle_key and self.active_downloads[current_handle_key]:
+                             self.active_downloads[current_handle_key].write(base64.b64decode(b64_data))
+                    except Exception as e:
+                        print(f"[FILE] Chunk error: {e}")
+
+                elif cmd == "FILE_END":
+                    try:
+                        # FILE_END | sender | target | filename
+                        sender, target_grp, filename = parts[1], parts[2], parts[3]
+                        
+                        # Close handle
+                        current_handle_key = None
+                        for key in self.active_downloads.keys():
+                            if key.endswith(f"_{filename}") and key.startswith(f"{sender}_"):
+                                current_handle_key = key
+                                break
+                        
+                        if current_handle_key:
+                            if self.active_downloads.get(current_handle_key):
+                                self.active_downloads[current_handle_key].close()
+                                del self.active_downloads[current_handle_key]
+                            
+                            full_path = os.path.abspath(os.path.join("downloads", current_handle_key))
+                            print(f"[FILE_END] Saved to {full_path}")
+                            
+                            # Always show bubble to test (even if not active chat, for debug)
+                            # Logic: If direct or group match
+                            if self.target_name == sender or (self.chat_mode=="GROUP" and self.target_name==target_grp):
+                                self.after(0, lambda s=sender, f=filename, p=full_path: self.add_file_bubble(s, f, p))
+                        else:
+                            print(f"[FILE_END] No handle found for {filename}")
+                            # self.after(0, lambda: self.add_system_message(f"Debug: No download handle for {filename}"))
+                    except Exception as e:
+                        print(f"FILE_END Error: {e}")
+                        self.after(0, lambda e=e: self.add_system_message(f"SysErr: {e}"))
 
                 elif cmd == "REACTION":
                     # REACTION|UPDATE|message_id|reactions_str
@@ -1436,6 +1669,17 @@ class ChatAppClient(ctk.CTkFrame):
                                     break
                             except: pass
 
+                elif cmd == "PONG":
+                    print("[HEARTBEAT] Received PONG")
+                    pass
+
+                elif cmd == "FORCE_LOGOUT":
+                    # FORCE_LOGOUT|Reason
+                    reason = parts[1] if len(parts) > 1 else "Đăng nhập từ nơi khác"
+                    messagebox.showwarning("Đăng xuất", f"Tài khoản của bạn đã bị đăng nhập từ nơi khác.\nLý do: {reason}")
+                    self.quit_app(force_quit=True)
+                    break
+                
                 elif cmd == "MSG_DELIVERED":
                     # MSG_DELIVERED|receiver
                     if len(parts) >= 2:
@@ -1554,18 +1798,18 @@ class ChatAppClient(ctk.CTkFrame):
             self.msg_area._parent_canvas.yview_moveto(1.0)
         except: pass
 
-    def heartbeat_loop(self):
+    def heartbeat_loop(self, sock, conn_id):
         """Gửi PING định kỳ"""
         import time
-        while self.is_running:
-            if self.client_socket:
-                try:
-                    self.client_socket.sendall(Protocol.pack("PING"))
-                except:
-                    print("[HEARTBEAT] Ping failed!")
-                    self.handle_disconnect()
-                    break
-            time.sleep(30) # 30s
+        while self.is_running and sock:
+            if conn_id != self.conn_id: break
+            try:
+                print(f"[HEARTBEAT-{conn_id}] Sending PING...")
+                sock.sendall(Protocol.pack("PING"))
+                time.sleep(10) # 10s Ping
+            except:
+                print("[HEARTBEAT] Ping failed!")
+                break
 
 # if __name__ == "__main__":
 #     # Standalone testing not supported without MainApp
